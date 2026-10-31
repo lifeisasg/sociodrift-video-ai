@@ -1,10 +1,9 @@
 """SocioDrift Interactive Web Studio.
 
 Provides a modern, full-featured web interface to:
-1. Drag and drop any video directly from the browser.
-2. Run the end-to-end Video AI pipeline (scenes, metrics, mood, prompts).
-3. Generate real cinematic audio with Meta MusicGen with one click.
-4. Preview the video with synchronized AI music playback.
+1. Single Video Mode: Drag & drop, scene analysis, Meta MusicGen audio synthesis, lossless video muxing.
+2. Batch Video Mode: Multi-file drag & drop, sequential one-by-one queue processing, real-time cards, download buttons.
+3. Refresh Persistence: State saved in localStorage so page refreshes never lose your work until reset.
 
 Run via:
     python web_app.py
@@ -60,16 +59,16 @@ pipeline = VideoAIPipeline(segment_duration=3.0, demo_mode=False)
 
 @app.post("/api/analyze")
 async def analyze_video(file: UploadFile = File(...)):
+    """Analyze a single video and produce structured scene breakdowns and prompts."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file provided")
 
-    # Save uploaded file
     target_path = UPLOAD_DIR / file.filename
     with open(target_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
     try:
-        result = pipeline.process_video(target_path, output_dir=BASE_DIR / "outputs")
+        result = pipeline.process_video(target_path, output_dir=OUTPUTS_DIR)
         result_dict = result.to_dict()
         result_dict["video_url"] = f"/static/uploads/{file.filename}"
         return JSONResponse(result_dict)
@@ -80,15 +79,16 @@ async def analyze_video(file: UploadFile = File(...)):
 
 @app.post("/api/generate-music")
 async def generate_music(payload: dict):
+    """Run Meta MusicGen audio generation and lossless video muxing for a video analysis."""
     filename = payload.get("filename")
     if not filename:
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    json_file = BASE_DIR / "outputs" / f"{Path(filename).stem}.json"
+    stem = Path(filename).stem
+    json_file = OUTPUTS_DIR / f"{stem}.json"
     if not json_file.exists():
         raise HTTPException(status_code=404, detail="Analysis JSON not found")
 
-    # Run generate_music.py using current python environment
     cmd = [
         sys.executable,
         str(BASE_DIR / "generate_music.py"),
@@ -105,19 +105,87 @@ async def generate_music(payload: dict):
         logger.error("Music generation failed: %s", exc.stderr)
         raise HTTPException(status_code=500, detail=exc.stderr or "Generation failed")
 
-    final_video_name = f"{Path(filename).stem}_with_ai_music.mp4"
+    soundtrack_name = f"{stem}_soundtrack.wav" if (AUDIO_DIR / f"{stem}_soundtrack.wav").exists() else "final_soundtrack.wav"
+    final_video_name = f"{stem}_with_ai_music.mp4"
     final_video_path = OUTPUTS_DIR / final_video_name
     final_video_url = f"/static/outputs/{final_video_name}" if final_video_path.exists() else None
 
+    scenes_data = payload.get("scenes", [])
+    scenes_response = []
+    for i in range(len(scenes_data)):
+        scene_id = f"scene-{i+1}"
+        stem_scene = AUDIO_DIR / f"{stem}_{scene_id}.wav"
+        url = f"/static/audio/{stem}_{scene_id}.wav" if stem_scene.exists() else f"/static/audio/{scene_id}.wav"
+        scenes_response.append({"scene_id": scene_id, "audio_url": url})
+
     return {
         "status": "SUCCESS",
-        "soundtrack_url": "/static/audio/final_soundtrack.wav",
+        "soundtrack_url": f"/static/audio/{soundtrack_name}",
         "final_video_url": final_video_url,
-        "scenes": [
-            {"scene_id": f"scene-{i+1}", "audio_url": f"/static/audio/scene-{i+1}.wav"}
-            for i in range(len(payload.get("scenes", [])))
-        ],
+        "scenes": scenes_response,
     }
+
+
+@app.post("/api/batch-process-video")
+async def batch_process_video(file: UploadFile = File(...)):
+    """Complete end-to-end processing for a batch queue item: analyzes, generates music & muxes video."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    target_path = UPLOAD_DIR / file.filename
+    with open(target_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        # Step 1: Run Video AI Pipeline
+        result = pipeline.process_video(target_path, output_dir=OUTPUTS_DIR)
+        result_dict = result.to_dict()
+        stem = Path(file.filename).stem
+        json_file = OUTPUTS_DIR / f"{stem}.json"
+
+        # Step 2: Run Meta MusicGen AI music generation & lossless video muxing
+        cmd = [
+            sys.executable,
+            str(BASE_DIR / "generate_music.py"),
+            "--json",
+            str(json_file),
+            "--output-dir",
+            str(AUDIO_DIR),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        logger.info("Batch MusicGen output for %s: %s", file.filename, proc.stdout)
+
+        soundtrack_name = f"{stem}_soundtrack.wav" if (AUDIO_DIR / f"{stem}_soundtrack.wav").exists() else "final_soundtrack.wav"
+        final_video_name = f"{stem}_with_ai_music.mp4"
+        final_video_path = OUTPUTS_DIR / final_video_name
+
+        scenes_data = result_dict.get("scenes", [])
+        scenes_list = []
+        for i in range(len(scenes_data)):
+            scene_id = f"scene-{i+1}"
+            stem_scene = AUDIO_DIR / f"{stem}_{scene_id}.wav"
+            url = f"/static/audio/{stem}_{scene_id}.wav" if stem_scene.exists() else f"/static/audio/{scene_id}.wav"
+            scenes_list.append({"scene_id": scene_id, "audio_url": url})
+
+        return JSONResponse({
+            "status": "SUCCESS",
+            "filename": file.filename,
+            "stem": stem,
+            "video_url": f"/static/uploads/{file.filename}",
+            "soundtrack_url": f"/static/audio/{soundtrack_name}",
+            "final_video_url": f"/static/outputs/{final_video_name}" if final_video_path.exists() else None,
+            "duration": result_dict.get("metadata", {}).get("duration_seconds", 0),
+            "scenes_count": len(scenes_data),
+            "dominant_emotion": result_dict.get("summary", {}).get("dominant_emotion", "Unknown"),
+            "scenes": scenes_list,
+            "analysis": result_dict,
+        })
+    except Exception as exc:
+        logger.error("Batch processing failed for %s: %s", file.filename, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"status": "ERROR", "filename": file.filename, "detail": str(exc)},
+        )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -145,6 +213,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       --text-muted: #94a3b8;
       --success: #10b981;
       --warning: #f59e0b;
+      --danger: #ef4444;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -158,7 +227,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     header {
       border-bottom: 1px solid var(--card-border);
-      padding: 1.25rem 2.5rem;
+      padding: 1.15rem 2.5rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -181,30 +250,72 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     .brand-title { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.3px; }
     .brand-subtitle { font-size: 0.78rem; color: var(--text-muted); font-weight: 500; }
-    .header-pills { display: flex; gap: 0.6rem; }
-    .pill {
-      background: rgba(255, 255, 255, 0.05);
+    
+    .nav-tabs {
+      display: flex;
+      background: rgba(255, 255, 255, 0.04);
+      padding: 4px;
+      border-radius: 12px;
       border: 1px solid var(--card-border);
-      padding: 0.3rem 0.8rem;
-      border-radius: 100px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      color: var(--text-muted);
+      gap: 4px;
     }
-    .pill.active { border-color: rgba(99, 102, 241, 0.5); color: #c7d2fe; background: rgba(99, 102, 241, 0.1); }
-    main { max-width: 1400px; margin: 0 auto; padding: 2.5rem 2rem; width: 100%; flex: 1; }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 0.5rem 1.1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      transition: all 0.2s ease;
+    }
+    .tab-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+    .tab-btn.active {
+      background: var(--accent);
+      color: white;
+      box-shadow: 0 2px 10px var(--accent-glow);
+    }
+    .badge-count {
+      background: rgba(255, 255, 255, 0.2);
+      font-size: 0.7rem;
+      padding: 1px 6px;
+      border-radius: 20px;
+    }
+
+    .header-actions { display: flex; align-items: center; gap: 0.75rem; }
+    .btn-reset {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      color: #fca5a5;
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      transition: all 0.2s;
+    }
+    .btn-reset:hover { background: rgba(239, 68, 68, 0.2); }
+
+    main { max-width: 1400px; margin: 0 auto; padding: 2rem; width: 100%; flex: 1; }
     
     /* Upload Zone */
     .upload-container {
       border: 2px dashed rgba(99, 102, 241, 0.35);
       border-radius: 20px;
-      padding: 3.5rem 2rem;
+      padding: 3rem 2rem;
       text-align: center;
       background: rgba(18, 20, 29, 0.4);
       cursor: pointer;
       transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
       position: relative;
-      margin-bottom: 2.5rem;
+      margin-bottom: 2rem;
     }
     .upload-container:hover, .upload-container.dragover {
       border-color: var(--accent);
@@ -214,26 +325,29 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     .upload-icon {
       font-size: 3rem;
-      margin-bottom: 1rem;
+      margin-bottom: 0.75rem;
       display: inline-block;
       filter: drop-shadow(0 4px 10px rgba(99, 102, 241, 0.5));
     }
-    .upload-title { font-size: 1.35rem; font-weight: 700; margin-bottom: 0.5rem; }
-    .upload-hint { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+    .upload-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 0.4rem; }
+    .upload-hint { color: var(--text-muted); font-size: 0.88rem; margin-bottom: 1.25rem; }
+    
     .btn {
       background: var(--accent-grad);
       color: white;
       border: none;
-      padding: 0.75rem 1.75rem;
+      padding: 0.75rem 1.6rem;
       border-radius: 10px;
       font-weight: 600;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
       cursor: pointer;
       transition: all 0.2s;
       box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
       display: inline-flex;
       align-items: center;
+      justify-content: center;
       gap: 0.5rem;
+      text-decoration: none;
     }
     .btn:hover { opacity: 0.92; transform: translateY(-1px); box-shadow: 0 6px 20px rgba(99, 102, 241, 0.45); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
@@ -243,129 +357,215 @@ HTML_CONTENT = """<!DOCTYPE html>
       box-shadow: none;
     }
     .btn-secondary:hover { background: rgba(255, 255, 255, 0.12); }
-    
-    /* Studio Grid */
+    .btn-success {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+    }
+    .btn-success:hover { box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45); }
+
+    /* Single Studio Grid */
     .studio-grid {
       display: grid;
       grid-template-columns: 460px 1fr;
       gap: 2rem;
-      display: none;
+      align-items: start;
     }
-    .studio-grid.active { display: grid; }
+    @media (max-width: 1024px) {
+      .studio-grid { grid-template-columns: 1fr; }
+    }
+    
     .panel {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 18px;
       padding: 1.5rem;
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(10px);
     }
-    .panel-title {
-      font-size: 1.1rem;
-      font-weight: 700;
-      margin-bottom: 1.25rem;
+    .panel-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      margin-bottom: 1.25rem;
+      padding-bottom: 0.85rem;
+      border-bottom: 1px solid var(--card-border);
     }
-    .video-preview-wrapper {
-      border-radius: 14px;
+    .panel-title { font-size: 1.05rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; }
+
+    .video-wrapper {
+      border-radius: 12px;
       overflow: hidden;
       background: #000;
-      aspect-ratio: 16/9;
-      margin-bottom: 1.25rem;
-      border: 1px solid var(--card-border);
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1rem;
+      border: 1px solid rgba(255, 255, 255, 0.05);
     }
-    video { width: 100%; height: 100%; object-fit: contain; display: block; }
-    
-    /* Audio Deck */
+    video { width: 100%; height: 100%; object-fit: contain; }
+
+    .meta-table { width: 100%; font-size: 0.85rem; margin-bottom: 1.25rem; }
+    .meta-table td { padding: 0.4rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.04); }
+    .meta-table td:first-child { color: var(--text-muted); width: 40%; }
+    .meta-table td:last-child { font-weight: 600; text-align: right; }
+
+    /* Audio Player Custom */
     .audio-deck {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 1.25rem;
-      margin-top: 1.25rem;
-    }
-    .deck-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.85rem; }
-    .deck-title { font-weight: 700; font-size: 0.95rem; display: flex; align-items: center; gap: 0.4rem; }
-    audio { width: 100%; height: 40px; border-radius: 8px; filter: invert(0.9) hue-rotate(180deg); }
-    
-    /* Scene List */
-    .scene-list { display: flex; flex-direction: column; gap: 1rem; }
-    .scene-card {
-      background: rgba(255, 255, 255, 0.02);
-      border: 1px solid var(--card-border);
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.25);
       border-radius: 14px;
       padding: 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    .audio-deck audio { width: 100%; height: 40px; margin-top: 0.6rem; border-radius: 8px; }
+
+    /* Scenes List */
+    .scenes-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      max-height: 820px;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+    }
+    .scene-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      padding: 1.15rem;
       transition: all 0.2s;
     }
-    .scene-card:hover { border-color: rgba(99, 102, 241, 0.4); background: rgba(99, 102, 241, 0.03); }
-    .scene-card-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.85rem;
+    .scene-card:hover {
+      border-color: rgba(99, 102, 241, 0.4);
+      background: rgba(255, 255, 255, 0.05);
     }
-    .scene-id { font-weight: 800; font-size: 0.95rem; text-transform: uppercase; color: #c7d2fe; }
-    .badge {
-      font-size: 0.72rem;
+    .scene-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+    .scene-badge {
+      font-size: 0.75rem;
       font-weight: 700;
       padding: 0.25rem 0.6rem;
       border-radius: 6px;
-      text-transform: uppercase;
       letter-spacing: 0.5px;
+      text-transform: uppercase;
     }
-    .badge-calm { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-    .badge-romantic { background: rgba(236, 72, 153, 0.15); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.3); }
-    .badge-action { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-    .badge-role { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.3); }
-    
-    .metrics-row {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 0.75rem;
-      margin-bottom: 1rem;
+    .mood-SUSPENSE { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); }
+    .mood-CALM { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+    .mood-ENERGETIC { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+    .mood-NEUTRAL { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.4); }
+    .mood-MELANCHOLIC { background: rgba(139, 92, 246, 0.2); color: #c084fc; border: 1px solid rgba(139, 92, 246, 0.4); }
+
+    .metrics-chips {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
     }
-    .metric-box {
+    .chip {
       background: rgba(0, 0, 0, 0.25);
-      padding: 0.6rem;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.04);
-    }
-    .metric-label { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; }
-    .metric-value { font-size: 0.88rem; font-weight: 700; margin-top: 0.2rem; font-family: 'JetBrains Mono', monospace; }
-    
-    .colors-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; }
-    .color-swatch {
-      width: 20px;
-      height: 20px;
-      border-radius: 5px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-    }
-    .prompt-box {
-      background: rgba(0, 0, 0, 0.4);
       border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 8px;
-      padding: 0.75rem;
-      font-family: 'JetBrains Mono', monospace;
+      padding: 0.25rem 0.55rem;
+      border-radius: 6px;
       font-size: 0.74rem;
-      color: #cbd5e1;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .chip strong { color: var(--text); }
+
+    .prompt-box {
+      background: rgba(0, 0, 0, 0.35);
+      border-left: 3px solid var(--accent);
+      padding: 0.65rem 0.85rem;
+      border-radius: 0 8px 8px 0;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
       line-height: 1.45;
-      max-height: 100px;
-      overflow-y: auto;
+      color: #e2e8f0;
       white-space: pre-wrap;
     }
+    .colors-row { display: flex; gap: 0.35rem; align-items: center; margin: 0.6rem 0; }
+    .color-swatch {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
 
-    /* Loading overlay */
+    /* Batch Mode Styles */
+    .batch-queue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .batch-queue-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 0.75rem 1.25rem;
+      font-size: 0.88rem;
+    }
+    .batch-results-list {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+    .batch-result-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 1.5rem;
+      align-items: center;
+      transition: all 0.25s;
+    }
+    @media (max-width: 900px) {
+      .batch-result-card { grid-template-columns: 1fr; }
+    }
+    .batch-result-card.success { border-color: rgba(16, 185, 129, 0.35); }
+    .batch-result-card.error { border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.05); }
+
+    .progress-bar-container {
+      width: 100%;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 100px;
+      overflow: hidden;
+      margin: 1rem 0;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent-grad);
+      transition: width 0.4s ease;
+    }
+
+    /* Spinner */
     .spinner {
-      border: 3px solid rgba(255, 255, 255, 0.1);
-      border-top: 3px solid var(--accent);
+      border: 3px solid rgba(255, 255, 255, 0.15);
+      border-top-color: var(--accent);
       border-radius: 50%;
       width: 24px;
       height: 24px;
       animation: spin 0.8s linear infinite;
       display: inline-block;
     }
-    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .pulse { animation: pulseAnim 2s infinite ease-in-out; }
+    @keyframes pulseAnim {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
   </style>
 </head>
 <body>
@@ -374,114 +574,306 @@ HTML_CONTENT = """<!DOCTYPE html>
     <div class="logo-group">
       <div class="logo-badge">SD</div>
       <div>
-        <div class="brand-title">SocioDrift Video AI</div>
-        <div class="brand-subtitle">Automated Video Segmentation & Generative Music Studio</div>
+        <div class="brand-title">SocioDrift Studio</div>
+        <div class="brand-subtitle">AI Video Analysis & Meta MusicGen Co-Pilot</div>
       </div>
     </div>
-    <div class="header-pills">
-      <span class="pill active">● OpenCV Computer Vision</span>
-      <span class="pill active">● Meta MusicGen</span>
-      <span class="pill active">● Apple MPS Acceleration</span>
+
+    <!-- Mode Selector Tabs -->
+    <div class="nav-tabs">
+      <button class="tab-btn active" id="tabSingleBtn" onclick="switchMode('single')">
+        <span>🎬 Single Video Studio</span>
+      </button>
+      <button class="tab-btn" id="tabBatchBtn" onclick="switchMode('batch')">
+        <span>⚡ Multi-Video Batch Queue</span>
+        <span class="badge-count" id="batchBadge">0</span>
+      </button>
+    </div>
+
+    <div class="header-actions">
+      <button class="btn-reset" onclick="resetActiveWorkspace()" title="Clear cached session data and reset studio">
+        <span>🔄 Reset Studio</span>
+      </button>
     </div>
   </header>
 
   <main>
-    <!-- Upload Area -->
-    <div class="upload-container" id="dropZone" onclick="document.getElementById('fileInput').click()">
-      <input type="file" id="fileInput" accept="video/mp4,video/quicktime,video/x-msvideo" style="display:none" onchange="handleFileSelect(event)">
-      <div class="upload-icon">🎬</div>
-      <div class="upload-title">Drop your video here, or click to browse</div>
-      <div class="upload-hint">Supports MP4, MOV, AVI (e.g. sample_video.mp4) • Analyzes scenes, motion & mood instantly</div>
-      <button class="btn" type="button">Select Video File</button>
-    </div>
+    <!-- ==================== TAB 1: SINGLE VIDEO STUDIO ==================== -->
+    <section id="singleModeSection">
+      <!-- Upload Zone -->
+      <div class="upload-container" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <input type="file" id="fileInput" accept="video/mp4,video/quicktime,video/x-msvideo,video/webm" style="display:none;" onchange="handleSingleFileSelect(event)">
+        <div class="upload-icon">🎬</div>
+        <div class="upload-title">Drop your video here or click to browse</div>
+        <div class="upload-hint">Supports MP4, MOV, AVI, WebM. Evaluates motion, colors, lighting & suspense.</div>
+        <button class="btn" onclick="event.stopPropagation(); document.getElementById('fileInput').click()">Select Video File</button>
+      </div>
 
-    <!-- Active Studio View -->
-    <div class="studio-grid" id="studioGrid">
-      
-      <!-- Left Column: Video & Master Soundtrack -->
-      <div>
-        <div class="panel">
-          <div class="panel-title">
-            <span>Video Preview</span>
-            <span id="videoMetaBadge" class="badge badge-role">0.0s</span>
-          </div>
-          <div class="video-preview-wrapper">
-            <video id="videoPlayer" controls></video>
-          </div>
+      <!-- Loading State -->
+      <div id="singleLoading" class="panel" style="display:none; text-align:center; padding:3rem; margin-bottom:2rem;">
+        <div class="spinner" style="width:40px; height:40px; margin-bottom:1rem;"></div>
+        <div id="singleLoadingText" style="font-size:1.15rem; font-weight:700; margin-bottom:0.5rem;">Analyzing Video Dynamics...</div>
+        <div style="color:var(--text-muted); font-size:0.9rem;">Extracting frames, computing optical flow, lighting balance & AI musical prompts...</div>
+      </div>
 
-          <div style="margin-top: 1rem; display: flex; gap: 0.75rem;">
-            <button class="btn" id="generateMusicBtn" onclick="generateMusic()" style="flex:1;">
-              <span>🎵 Generate AI Music (Meta MusicGen)</span>
-            </button>
-          </div>
+      <!-- Studio Interactive Workspace -->
+      <div id="studioGrid" class="studio-grid" style="display:none;">
+        
+        <!-- Left Column: Video Preview & Primary Controls -->
+        <div>
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">📹 Video Preview</span>
+              <span id="videoStatusPill" class="scene-badge mood-CALM">ORIGINAL</span>
+            </div>
 
-          <!-- Stitched Soundtrack Player -->
-          <div class="audio-deck" id="soundtrackDeck" style="display: none;">
-            <div class="deck-header">
-              <div class="deck-title">🎶 Complete Synced Soundtrack</div>
-              <div style="display: flex; gap: 0.5rem; align-items: center;">
-                <span class="badge badge-calm">9.0s • 32kHz</span>
-                <a id="downloadSoundtrackBtn" class="pill" style="color: #6ee7b7; border-color: rgba(16, 185, 129, 0.4); text-decoration: none; cursor: pointer;">⬇ Download WAV</a>
+            <div class="video-wrapper">
+              <video id="videoPlayer" controls playsinline></video>
+            </div>
+
+            <table class="meta-table">
+              <tr><td>Filename:</td><td id="metaFilename">-</td></tr>
+              <tr><td>Duration:</td><td id="metaDuration">-</td></tr>
+              <tr><td>Resolution:</td><td id="metaRes">-</td></tr>
+              <tr><td>FPS / Codec:</td><td id="metaFps">-</td></tr>
+              <tr><td>Dominant Mood:</td><td id="metaMood">-</td></tr>
+              <tr><td>Analyzed Scenes:</td><td id="metaScenesCount">-</td></tr>
+            </table>
+
+            <div style="display:flex; flex-direction:column; gap:0.75rem;">
+              <button id="generateMusicBtn" class="btn" onclick="generateMusic()">
+                <span>🎵 Synthesize AI Music & Multiplex Video</span>
+              </button>
+              
+              <div id="finalVideoDownloadRow" style="display:none;">
+                <a id="downloadFinalVideoBtn" class="btn btn-success" style="width:100%;" download>
+                  <span>⬇ Download Final Video (100% Quality)</span>
+                </a>
               </div>
+
+              <div style="display:flex; gap:0.5rem;">
+                <button class="btn btn-secondary" style="flex:1;" onclick="downloadJson()">
+                  <span>📄 Export JSON</span>
+                </button>
+                <button class="btn btn-secondary" style="flex:1;" onclick="document.getElementById('fileInput').click()">
+                  <span>🔄 New Video</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Column: AI Audio & Scene Breakdown -->
+        <div>
+          <!-- Master Soundtrack Deck (Revealed when generated) -->
+          <div id="soundtrackDeck" class="audio-deck" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div style="font-size:1.05rem; font-weight:700; color:#c7d2fe;">🎶 Meta MusicGen Master Soundtrack</div>
+                <div style="font-size:0.78rem; color:var(--text-muted); margin-top:2px;">500ms PyDub Equal-Power Crossfade • -16 dBFS Loudness Normalized • 1000ms Fade-out</div>
+              </div>
+              <a id="downloadSoundtrackBtn" class="btn btn-secondary" style="font-size:0.8rem; padding:0.4rem 0.85rem;" download>
+                <span>⬇ Download Audio (.wav)</span>
+              </a>
             </div>
             <audio id="soundtrackPlayer" controls></audio>
           </div>
-        </div>
-      </div>
 
-      <!-- Right Column: Scene Breakdown -->
-      <div>
-        <div class="panel">
-          <div class="panel-title">
-            <span>Detected Scene Segments</span>
-            <div style="display: flex; gap: 0.5rem; align-items: center;">
-              <span id="sceneCountBadge" class="badge badge-role">0 Scenes</span>
-              <a id="downloadJsonBtn" class="pill" style="color:#c7d2fe; text-decoration:none; cursor:pointer;" onclick="downloadJson()">⬇ Export JSON</a>
+          <!-- Scene Cue Breakdown List -->
+          <div class="panel">
+            <div class="panel-header">
+              <span class="panel-title">🎼 Scene Cues & AI Music Prompts</span>
+              <span id="sceneCountBadge" style="font-size:0.8rem; color:var(--text-muted);">0 Scenes</span>
+            </div>
+
+            <div class="scenes-grid" id="sceneList">
+              <!-- Dynamically populated scene cards -->
             </div>
           </div>
-
-          <div class="scene-list" id="sceneList">
-            <!-- Scene cards populated here -->
-          </div>
         </div>
+
+      </div>
+    </section>
+
+    <!-- ==================== TAB 2: MULTI-VIDEO BATCH QUEUE ==================== -->
+    <section id="batchModeSection" style="display:none;">
+      <!-- Batch Upload Zone -->
+      <div class="upload-container" id="batchDropZone" onclick="document.getElementById('batchFileInput').click()">
+        <input type="file" id="batchFileInput" multiple accept="video/mp4,video/quicktime,video/x-msvideo,video/webm" style="display:none;" onchange="handleBatchFilesSelect(event)">
+        <div class="upload-icon">⚡</div>
+        <div class="upload-title">Drop multiple videos here for Batch AI Processing</div>
+        <div class="upload-hint">Upload multiple video files. Each will be analyzed, synthesized with Meta MusicGen, and muxed one by one.</div>
+        <button class="btn" onclick="event.stopPropagation(); document.getElementById('batchFileInput').click()">Select Multiple Videos</button>
       </div>
 
-    </div>
+      <!-- Batch Queue Status Panel -->
+      <div id="batchQueuePanel" class="panel" style="margin-bottom:2rem; display:none;">
+        <div class="panel-header">
+          <span class="panel-title">📋 Video Processing Queue</span>
+          <div style="display:flex; gap:0.5rem;">
+            <button id="startBatchBtn" class="btn btn-success" onclick="startBatchProcessing()">
+              <span>🚀 Start Batch Processing</span>
+            </button>
+            <button class="btn btn-secondary" onclick="clearBatchQueue()">
+              <span>Clear Queue</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="progress-bar-container" id="batchProgressBarBox" style="display:none;">
+          <div class="progress-bar-fill" id="batchProgressBar"></div>
+        </div>
+        <div id="batchProgressText" style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem; display:none;"></div>
+
+        <div class="batch-queue-list" id="batchQueueList"></div>
+      </div>
+
+      <!-- Completed Batch Results Feed -->
+      <div id="batchResultsContainer" style="display:none;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem;">
+          <h2 style="font-size:1.25rem; font-weight:700;">🎬 Completed Video AI Soundtracks (<span id="batchCompletedCount">0</span>)</h2>
+          <button class="btn btn-secondary" onclick="clearBatchResults()">Clear Results History</button>
+        </div>
+        <div class="batch-results-list" id="batchResultsList"></div>
+      </div>
+    </section>
   </main>
 
   <script>
-    let currentData = null;
-    const dropZone = document.getElementById('dropZone');
+    // LocalStorage Keys
+    const STORAGE_KEY_SINGLE = 'sociodrift_studio_single_v1';
+    const STORAGE_KEY_BATCH = 'sociodrift_studio_batch_v1';
+    const STORAGE_KEY_TAB = 'sociodrift_studio_active_tab';
 
-    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-      dropZone.addEventListener(eventName, preventDefaults, false);
-    });
-    function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+    // State
+    let singleState = null;
+    let batchQueue = [];
+    let batchResults = [];
+    let isBatchRunning = false;
 
-    ['dragenter', 'dragover'].forEach(name => {
-      dropZone.addEventListener(name, () => dropZone.classList.add('dragover'), false);
-    });
-    ['dragleave', 'drop'].forEach(name => {
-      dropZone.addEventListener(name, () => dropZone.classList.remove('dragover'), false);
-    });
-
-    dropZone.addEventListener('drop', (e) => {
-      const dt = e.dataTransfer;
-      const files = dt.files;
-      if (files.length) uploadFile(files[0]);
+    // Initialization
+    window.addEventListener('DOMContentLoaded', () => {
+      setupDragAndDrop();
+      restoreSavedState();
     });
 
-    function handleFileSelect(event) {
-      const files = event.target.files;
-      if (files.length) uploadFile(files[0]);
+    // Tab Switching
+    function switchMode(mode) {
+      localStorage.setItem(STORAGE_KEY_TAB, mode);
+      const tabSingleBtn = document.getElementById('tabSingleBtn');
+      const tabBatchBtn = document.getElementById('tabBatchBtn');
+      const singleSection = document.getElementById('singleModeSection');
+      const batchSection = document.getElementById('batchModeSection');
+
+      if (mode === 'batch') {
+        tabSingleBtn.classList.remove('active');
+        tabBatchBtn.classList.add('active');
+        singleSection.style.display = 'none';
+        batchSection.style.display = 'block';
+      } else {
+        tabBatchBtn.classList.remove('active');
+        tabSingleBtn.classList.add('active');
+        batchSection.style.display = 'none';
+        singleSection.style.display = 'block';
+      }
     }
 
-    async function uploadFile(file) {
-      dropZone.innerHTML = `
-        <div class="spinner"></div>
-        <div class="upload-title" style="margin-top:1rem;">Analyzing Video with Computer Vision...</div>
-        <div class="upload-hint">Extracting optical flow, luminance, edge complexity & mood...</div>
-      `;
+    // Restore from localStorage
+    function restoreSavedState() {
+      const savedTab = localStorage.getItem(STORAGE_KEY_TAB);
+      if (savedTab === 'batch') switchMode('batch');
+
+      // 1. Restore Single State
+      try {
+        const rawSingle = localStorage.getItem(STORAGE_KEY_SINGLE);
+        if (rawSingle) {
+          singleState = JSON.parse(rawSingle);
+          if (singleState && singleState.data) {
+            renderSingleAnalysis(singleState.data, false);
+            if (singleState.music) {
+              renderGeneratedMusic(singleState.music);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Could not restore single state:', e);
+      }
+
+      // 2. Restore Batch State
+      try {
+        const rawBatch = localStorage.getItem(STORAGE_KEY_BATCH);
+        if (rawBatch) {
+          batchResults = JSON.parse(rawBatch) || [];
+          if (batchResults.length > 0) {
+            renderAllBatchResults();
+          }
+        }
+      } catch (e) {
+        console.warn('Could not restore batch state:', e);
+      }
+      updateBatchBadge();
+    }
+
+    function resetActiveWorkspace() {
+      if (confirm('Reset workspace and clear cached video sessions?')) {
+        localStorage.removeItem(STORAGE_KEY_SINGLE);
+        localStorage.removeItem(STORAGE_KEY_BATCH);
+        localStorage.removeItem(STORAGE_KEY_TAB);
+        location.reload();
+      }
+    }
+
+    // Drag and Drop
+    function setupDragAndDrop() {
+      const dropZone = document.getElementById('dropZone');
+      ['dragenter', 'dragover'].forEach(name => {
+        dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+      });
+      ['dragleave', 'drop'].forEach(name => {
+        dropZone.addEventListener(name, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); });
+      });
+      dropZone.addEventListener('drop', (e) => {
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+          if (files.length > 1) {
+            // User dropped multiple files into single zone -> seamlessly route to batch mode!
+            switchMode('batch');
+            queueBatchFiles(Array.from(files));
+          } else {
+            uploadSingleFile(files[0]);
+          }
+        }
+      });
+
+      const batchDropZone = document.getElementById('batchDropZone');
+      ['dragenter', 'dragover'].forEach(name => {
+        batchDropZone.addEventListener(name, (e) => { e.preventDefault(); batchDropZone.classList.add('dragover'); });
+      });
+      ['dragleave', 'drop'].forEach(name => {
+        batchDropZone.addEventListener(name, (e) => { e.preventDefault(); batchDropZone.classList.remove('dragover'); });
+      });
+      batchDropZone.addEventListener('drop', (e) => {
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+          queueBatchFiles(Array.from(files));
+        }
+      });
+    }
+
+    // ==================== SINGLE VIDEO LOGIC ====================
+    function handleSingleFileSelect(e) {
+      const file = e.target.files[0];
+      if (file) uploadSingleFile(file);
+    }
+
+    async function uploadSingleFile(file) {
+      const loading = document.getElementById('singleLoading');
+      const dropZone = document.getElementById('dropZone');
+      const studioGrid = document.getElementById('studioGrid');
+
+      dropZone.style.display = 'none';
+      studioGrid.style.display = 'none';
+      loading.style.display = 'block';
 
       const formData = new FormData();
       formData.append('file', file);
@@ -489,65 +881,71 @@ HTML_CONTENT = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/analyze', { method: 'POST', body: formData });
         if (!res.ok) throw new Error(await res.text());
-        currentData = await res.json();
-        renderStudio(currentData);
+        const data = await res.json();
+        
+        singleState = { data: data, music: null };
+        localStorage.setItem(STORAGE_KEY_SINGLE, JSON.stringify(singleState));
+
+        loading.style.display = 'none';
+        renderSingleAnalysis(data, true);
       } catch (err) {
-        alert('Analysis failed: ' + err.message);
-        location.reload();
+        loading.style.display = 'none';
+        dropZone.style.display = 'block';
+        alert('Analysis error: ' + err.message);
       }
     }
 
-    function renderStudio(data) {
-      dropZone.style.display = 'none';
+    function renderSingleAnalysis(data, autoPlay = false) {
+      document.getElementById('dropZone').style.display = 'none';
       const grid = document.getElementById('studioGrid');
-      grid.classList.add('active');
+      grid.style.display = 'grid';
 
+      // Video preview
       const video = document.getElementById('videoPlayer');
       video.src = data.video_url;
+      if (autoPlay) video.play().catch(() => {});
 
-      document.getElementById('videoMetaBadge').textContent = `${data.video_duration}s • ${data.fps} FPS • ${data.resolution}`;
-      document.getElementById('sceneCountBadge').textContent = `${data.total_segments} Scenes`;
+      // Metadata
+      document.getElementById('metaFilename').textContent = data.filename || 'Uploaded Video';
+      document.getElementById('metaDuration').textContent = `${(data.metadata?.duration_seconds || 0).toFixed(1)}s`;
+      document.getElementById('metaRes').textContent = `${data.metadata?.width || 0} x ${data.metadata?.height || 0}`;
+      document.getElementById('metaFps').textContent = `${(data.metadata?.fps || 0).toFixed(0)} fps (${data.metadata?.codec || 'unknown'})`;
+      
+      const domMood = data.summary?.dominant_emotion || 'NEUTRAL';
+      const moodEl = document.getElementById('metaMood');
+      moodEl.textContent = domMood;
+      moodEl.className = `scene-badge mood-${domMood}`;
 
+      document.getElementById('metaScenesCount').textContent = `${data.scenes?.length || 0} segments`;
+      document.getElementById('sceneCountBadge').textContent = `${data.scenes?.length || 0} Scenes`;
+
+      // Render Scene Cards
       const sceneList = document.getElementById('sceneList');
       sceneList.innerHTML = '';
 
-      data.scenes.forEach(scene => {
-        const moodBadgeClass = scene.mood === 'calm' ? 'badge-calm' : (scene.mood === 'romantic' ? 'badge-romantic' : 'badge-action');
-        const colorsHtml = (scene.metrics.dominant_colors || []).map(c => 
-          `<div class="color-swatch" style="background:${c}" title="${c}"></div>`
-        ).join('');
-
+      (data.scenes || []).forEach((scene) => {
         const card = document.createElement('div');
         card.className = 'scene-card';
+        card.id = `card_${scene.scene_id}`;
+
+        const colorsHtml = (scene.features?.dominant_colors || [])
+          .map(c => `<div class="color-swatch" style="background: rgb(${c[0]}, ${c[1]}, ${c[2]});" title="RGB(${c[0]}, ${c[1]}, ${c[2]})"></div>`)
+          .join('');
+
         card.innerHTML = `
-          <div class="scene-card-header">
-            <div>
-              <span class="scene-id">${scene.scene_id}</span>
-              <span style="font-size:0.8rem; color:#94a3b8; margin-left:0.5rem;">(${scene.start}s - ${scene.end}s)</span>
+          <div class="scene-top">
+            <div style="display:flex; align-items:center; gap:0.6rem;">
+              <strong style="color:#c7d2fe; font-size:0.95rem;">${scene.scene_id.toUpperCase()}</strong>
+              <span style="font-size:0.75rem; color:#94a3b8; font-family:'JetBrains Mono';">${scene.start_time.toFixed(1)}s – ${scene.end_time.toFixed(1)}s</span>
             </div>
-            <div>
-              <span class="badge ${moodBadgeClass}">${scene.mood}</span>
-              <span class="badge badge-role">${scene.story_role}</span>
-            </div>
+            <span class="scene-badge mood-${scene.primary_emotion}">${scene.primary_emotion}</span>
           </div>
 
-          <div class="metrics-row">
-            <div class="metric-box">
-              <div class="metric-label">Style / BPM</div>
-              <div class="metric-value">${scene.music_cue.tempo} BPM</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Motion / Flow</div>
-              <div class="metric-value">${scene.metrics.camera_motion_intensity}</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Brightness</div>
-              <div class="metric-value">${Math.round(scene.metrics.average_brightness)}</div>
-            </div>
-            <div class="metric-box">
-              <div class="metric-label">Instrument</div>
-              <div class="metric-value" style="font-size:0.75rem;">${scene.music_cue.primary_instrument}</div>
-            </div>
+          <div class="metrics-chips">
+            <div class="chip">Motion: <strong>${(scene.features?.motion_score || 0).toFixed(2)}</strong></div>
+            <div class="chip">Light: <strong>${(scene.features?.brightness || 0).toFixed(0)}</strong></div>
+            <div class="chip">Energy: <strong>${(scene.music_cues?.energy_percent || 0).toFixed(0)}%</strong></div>
+            <div class="chip">Tempo: <strong>${scene.music_cues?.tempo_bpm || 100} BPM</strong></div>
           </div>
 
           <div class="colors-row">
@@ -569,18 +967,9 @@ HTML_CONTENT = """<!DOCTYPE html>
       });
     }
 
-    function downloadJson() {
-      if (!currentData) return;
-      const blob = new Blob([JSON.stringify(currentData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = (currentData.filename ? currentData.filename.replace(/\\.[^/.]+$/, "") : "analysis") + ".json";
-      a.click();
-      URL.revokeObjectURL(url);
-    }
-
     async function generateMusic() {
+      if (!singleState || !singleState.data) return;
+
       const btn = document.getElementById('generateMusicBtn');
       btn.disabled = true;
       btn.innerHTML = `<div class="spinner" style="width:18px; height:18px;"></div> <span>Synthesizing with Meta MusicGen (Apple MPS GPU)...</span>`;
@@ -590,75 +979,334 @@ HTML_CONTENT = """<!DOCTYPE html>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            filename: currentData.filename,
-            scenes: currentData.scenes
+            filename: singleState.data.filename,
+            scenes: singleState.data.scenes
           })
         });
 
         if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
+        const musicData = await res.json();
 
-        // Reveal master soundtrack
-        const deck = document.getElementById('soundtrackDeck');
-        deck.style.display = 'block';
-        const stPlayer = document.getElementById('soundtrackPlayer');
-        const stUrl = data.soundtrack_url + '?t=' + Date.now();
-        stPlayer.src = stUrl;
-        
-        const dlSoundtrack = document.getElementById('downloadSoundtrackBtn');
-        if (dlSoundtrack) {
-          dlSoundtrack.href = data.soundtrack_url;
-          dlSoundtrack.download = currentData.filename.replace(/\.[^/.]+$/, "") + "_soundtrack.wav";
-        }
+        // Save state to localStorage
+        singleState.music = musicData;
+        localStorage.setItem(STORAGE_KEY_SINGLE, JSON.stringify(singleState));
 
-        // Reveal scene audios
-        data.scenes.forEach(s => {
-          const row = document.getElementById(`audioRow_${s.scene_id}`);
-          if (row) {
-            row.style.display = 'block';
-            const audioElem = document.getElementById(`audio_${s.scene_id}`);
-            audioElem.src = s.audio_url + '?t=' + Date.now();
-            const dlScene = document.getElementById(`dl_${s.scene_id}`);
-            if (dlScene) {
-              dlScene.href = s.audio_url;
-            }
-          }
-        });
-
-        // Switch video to final synchronized video with AI music
-        if (data.final_video_url) {
-          const video = document.getElementById('videoPlayer');
-          video.src = data.final_video_url + '?t=' + Date.now();
-          video.load();
-          video.play().catch(() => {});
-
-          let dlBtn = document.getElementById('downloadVideoBtn');
-          if (!dlBtn) {
-            dlBtn = document.createElement('a');
-            dlBtn.id = 'downloadVideoBtn';
-            dlBtn.className = 'btn';
-            dlBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
-            dlBtn.style.marginTop = '0.85rem';
-            dlBtn.style.display = 'flex';
-            dlBtn.style.justifyContent = 'center';
-            dlBtn.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.4)';
-            dlBtn.style.textDecoration = 'none';
-            dlBtn.textContent = '⬇ Download Final Video (100% Quality Preserved)';
-            video.parentElement.after(dlBtn);
-          }
-          dlBtn.href = data.final_video_url;
-          dlBtn.download = currentData.filename.replace(/\.[^/.]+$/, "") + "_with_ai_music.mp4";
-        }
-
-        btn.innerHTML = `<span>✅ Music Synced & Merged with Video!</span>`;
-        btn.disabled = false;
-        btn.style.background = '#10b981';
-
+        renderGeneratedMusic(musicData);
       } catch (err) {
         alert('Generation error: ' + err.message);
         btn.disabled = false;
         btn.innerHTML = `<span>🎵 Retry Music Generation</span>`;
       }
+    }
+
+    function renderGeneratedMusic(musicData) {
+      const btn = document.getElementById('generateMusicBtn');
+      btn.innerHTML = `<span>✅ Music Synced & Multiplexed with Video!</span>`;
+      btn.disabled = false;
+      btn.style.background = '#10b981';
+
+      // Reveal master soundtrack
+      const deck = document.getElementById('soundtrackDeck');
+      deck.style.display = 'block';
+      const stPlayer = document.getElementById('soundtrackPlayer');
+      stPlayer.src = musicData.soundtrack_url + '?t=' + Date.now();
+      
+      const dlSoundtrack = document.getElementById('downloadSoundtrackBtn');
+      if (dlSoundtrack) {
+        dlSoundtrack.href = musicData.soundtrack_url;
+        dlSoundtrack.download = (singleState.data.filename || "video").replace(/\.[^/.]+$/, "") + "_soundtrack.wav";
+      }
+
+      // Reveal scene audios
+      (musicData.scenes || []).forEach(s => {
+        const row = document.getElementById(`audioRow_${s.scene_id}`);
+        if (row) {
+          row.style.display = 'block';
+          const audioElem = document.getElementById(`audio_${s.scene_id}`);
+          audioElem.src = s.audio_url + '?t=' + Date.now();
+          const dlScene = document.getElementById(`dl_${s.scene_id}`);
+          if (dlScene) {
+            dlScene.href = s.audio_url;
+          }
+        }
+      });
+
+      // Switch video player to final lossless video with AI music
+      if (musicData.final_video_url) {
+        const video = document.getElementById('videoPlayer');
+        video.src = musicData.final_video_url + '?t=' + Date.now();
+        video.load();
+
+        const pill = document.getElementById('videoStatusPill');
+        if (pill) {
+          pill.textContent = 'AI SOUNDTRACK SYNCED (100% QUALITY)';
+          pill.className = 'scene-badge mood-CALM';
+        }
+
+        const dlRow = document.getElementById('finalVideoDownloadRow');
+        const dlBtn = document.getElementById('downloadFinalVideoBtn');
+        if (dlRow && dlBtn) {
+          dlRow.style.display = 'block';
+          dlBtn.href = musicData.final_video_url;
+          dlBtn.download = (singleState.data.filename || "video").replace(/\.[^/.]+$/, "") + "_with_ai_music.mp4";
+        }
+      }
+    }
+
+    function downloadJson() {
+      if (!singleState || !singleState.data) return;
+      const blob = new Blob([JSON.stringify(singleState.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (singleState.data.filename ? singleState.data.filename.replace(/\.[^/.]+$/, "") : "analysis") + ".json";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ==================== BATCH MULTI-VIDEO LOGIC ====================
+    function handleBatchFilesSelect(e) {
+      const files = Array.from(e.target.files);
+      if (files.length > 0) queueBatchFiles(files);
+    }
+
+    function queueBatchFiles(files) {
+      files.forEach(f => {
+        // Prevent duplicates in current queue
+        if (!batchQueue.some(item => item.file.name === f.name && item.file.size === f.size)) {
+          batchQueue.push({ file: f, status: 'pending' });
+        }
+      });
+      renderBatchQueue();
+      updateBatchBadge();
+    }
+
+    function renderBatchQueue() {
+      const panel = document.getElementById('batchQueuePanel');
+      const list = document.getElementById('batchQueueList');
+      if (batchQueue.length === 0) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+      list.innerHTML = '';
+
+      batchQueue.forEach((item, idx) => {
+        const row = document.createElement('div');
+        row.className = 'batch-queue-item';
+        
+        let statusBadge = '<span class="scene-badge mood-NEUTRAL">Pending</span>';
+        if (item.status === 'processing') {
+          statusBadge = '<span class="scene-badge mood-ENERGETIC pulse">Processing...</span>';
+        } else if (item.status === 'completed') {
+          statusBadge = '<span class="scene-badge mood-CALM">Completed</span>';
+        } else if (item.status === 'failed') {
+          statusBadge = '<span class="scene-badge mood-SUSPENSE">Failed</span>';
+        }
+
+        row.innerHTML = `
+          <div style="display:flex; align-items:center; gap:0.75rem;">
+            <strong style="color:#c7d2fe;">#${idx + 1}</strong>
+            <div>
+              <div style="font-weight:600;">${item.file.name}</div>
+              <div style="font-size:0.75rem; color:#94a3b8;">${(item.file.size / (1024 * 1024)).toFixed(2)} MB</div>
+            </div>
+          </div>
+          <div>${statusBadge}</div>
+        `;
+        list.appendChild(row);
+      });
+    }
+
+    function updateBatchBadge() {
+      const badge = document.getElementById('batchBadge');
+      badge.textContent = batchQueue.length + batchResults.length;
+    }
+
+    function clearBatchQueue() {
+      if (isBatchRunning) {
+        alert('Batch processing is actively running. Please wait for completion.');
+        return;
+      }
+      batchQueue = [];
+      renderBatchQueue();
+      updateBatchBadge();
+    }
+
+    function clearBatchResults() {
+      if (confirm('Clear all completed batch results?')) {
+        batchResults = [];
+        localStorage.removeItem(STORAGE_KEY_BATCH);
+        renderAllBatchResults();
+        updateBatchBadge();
+      }
+    }
+
+    async function startBatchProcessing() {
+      if (isBatchRunning) return;
+      if (batchQueue.length === 0) {
+        alert('Please add at least one video to the batch queue first.');
+        return;
+      }
+
+      isBatchRunning = true;
+      const startBtn = document.getElementById('startBatchBtn');
+      startBtn.disabled = true;
+      startBtn.innerHTML = `<div class="spinner" style="width:16px; height:16px;"></div> <span>Processing Batch...</span>`;
+
+      const progressBox = document.getElementById('batchProgressBarBox');
+      const progressBar = document.getElementById('batchProgressBar');
+      const progressText = document.getElementById('batchProgressText');
+      progressBox.style.display = 'block';
+      progressText.style.display = 'block';
+
+      const total = batchQueue.length;
+
+      for (let i = 0; i < batchQueue.length; i++) {
+        const item = batchQueue[i];
+        item.status = 'processing';
+        renderBatchQueue();
+
+        const pct = Math.round((i / total) * 100);
+        progressBar.style.width = `${pct}%`;
+        progressText.innerHTML = `<strong>Processing ${i + 1} of ${total}:</strong> ${item.file.name} (Extracting scenes & synthesizing neural audio)...`;
+
+        const formData = new FormData();
+        formData.append('file', item.file);
+
+        try {
+          const res = await fetch('/api/batch-process-video', { method: 'POST', body: formData });
+          if (!res.ok) {
+            const errTxt = await res.text();
+            throw new Error(errTxt);
+          }
+          const result = await res.json();
+          item.status = 'completed';
+
+          // Prepend to completed results so newest is at the top
+          batchResults.unshift(result);
+          localStorage.setItem(STORAGE_KEY_BATCH, JSON.stringify(batchResults));
+          renderAllBatchResults();
+
+        } catch (err) {
+          console.error('Batch error on file:', item.file.name, err);
+          item.status = 'failed';
+          const failedResult = {
+            status: 'ERROR',
+            filename: item.file.name,
+            detail: err.message
+          };
+          batchResults.unshift(failedResult);
+          localStorage.setItem(STORAGE_KEY_BATCH, JSON.stringify(batchResults));
+          renderAllBatchResults();
+        }
+
+        renderBatchQueue();
+      }
+
+      progressBar.style.width = '100%';
+      progressText.innerHTML = `<strong>Batch Completed!</strong> Processed ${total} video clips.`;
+
+      isBatchRunning = false;
+      startBtn.disabled = false;
+      startBtn.innerHTML = `<span>🚀 Process Another Batch</span>`;
+    }
+
+    function renderAllBatchResults() {
+      const container = document.getElementById('batchResultsContainer');
+      const list = document.getElementById('batchResultsList');
+      const count = document.getElementById('batchCompletedCount');
+
+      if (!batchResults || batchResults.length === 0) {
+        container.style.display = 'none';
+        return;
+      }
+
+      container.style.display = 'block';
+      count.textContent = batchResults.length;
+      list.innerHTML = '';
+
+      batchResults.forEach((res, idx) => {
+        const card = document.createElement('div');
+        if (res.status === 'ERROR') {
+          card.className = 'batch-result-card error';
+          card.innerHTML = `
+            <div>
+              <div style="font-size:1.1rem; font-weight:700; color:#f87171; margin-bottom:0.4rem;">⚠️ ${res.filename}</div>
+              <span class="scene-badge mood-SUSPENSE">PROCESSING FAILED</span>
+            </div>
+            <div style="color:#fca5a5; font-size:0.88rem;">
+              <strong>Error Details:</strong> ${res.detail || 'Could not process video'}
+            </div>
+          `;
+        } else {
+          card.className = 'batch-result-card success';
+          const videoSrc = res.final_video_url || res.video_url;
+          const dlName = (res.filename || "video").replace(/\.[^/.]+$/, "");
+
+          card.innerHTML = `
+            <!-- Left: Video Player -->
+            <div>
+              <div class="video-wrapper" style="aspect-ratio:16/9; margin-bottom:0.75rem;">
+                <video src="${videoSrc}" controls playsinline style="width:100%; height:100%; object-fit:contain;"></video>
+              </div>
+              <div style="font-size:0.75rem; color:#94a3b8; text-align:center;">
+                ${res.final_video_url ? '✅ Merged with AI Soundtrack (100% Lossless)' : 'Original Video'}
+              </div>
+            </div>
+
+            <!-- Right: Details, Audio Player & Downloads -->
+            <div>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+                <div style="font-size:1.15rem; font-weight:700; color:#f8fafc;">${res.filename}</div>
+                <span class="scene-badge mood-${res.dominant_emotion || 'CALM'}">${res.dominant_emotion || 'NEUTRAL'}</span>
+              </div>
+
+              <div class="metrics-chips" style="margin-bottom:0.75rem;">
+                <div class="chip">Duration: <strong>${(res.duration || 0).toFixed(1)}s</strong></div>
+                <div class="chip">Scenes: <strong>${res.scenes_count || 0}</strong></div>
+                <div class="chip">Format: <strong>16-bit PCM / 32kHz</strong></div>
+              </div>
+
+              <!-- Audio Player -->
+              <div style="margin-bottom:1rem; background:rgba(0,0,0,0.3); padding:0.75rem; border-radius:10px;">
+                <div style="font-size:0.75rem; font-weight:600; color:#a5b4fc; margin-bottom:0.35rem;">
+                  🎵 Synthesized AI Soundtrack (PyDub Equal-Power Crossfade):
+                </div>
+                <audio src="${res.soundtrack_url}" controls style="width:100%; height:32px;"></audio>
+              </div>
+
+              <!-- Action Download Buttons -->
+              <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <a class="btn btn-secondary" style="font-size:0.8rem; padding:0.5rem 0.85rem;" href="${res.soundtrack_url}" download="${dlName}_soundtrack.wav">
+                  <span>⬇ Download Audio (.wav)</span>
+                </a>
+                ${res.final_video_url ? `
+                  <a class="btn btn-success" style="font-size:0.8rem; padding:0.5rem 0.85rem;" href="${res.final_video_url}" download="${dlName}_with_ai_music.mp4">
+                    <span>⬇ Download Final Video</span>
+                  </a>
+                ` : ''}
+                <button class="btn btn-secondary" style="font-size:0.8rem; padding:0.5rem 0.85rem;" onclick="downloadBatchItemJson(${idx})">
+                  <span>📄 Export JSON</span>
+                </button>
+              </div>
+            </div>
+          `;
+        }
+        list.appendChild(card);
+      });
+    }
+
+    function downloadBatchItemJson(idx) {
+      const item = batchResults[idx];
+      if (!item || !item.analysis) return;
+      const blob = new Blob([JSON.stringify(item.analysis, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${item.stem || "video"}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
     }
   </script>
 </body>
@@ -671,6 +1319,7 @@ if __name__ == "__main__":
     print("      SOCIODRIFT VIDEO AI INTERACTIVE WEB STUDIO      ")
     print("=" * 60)
     print("  * Studio URL : http://localhost:8000")
-    print("  * Ready for drag-and-drop video upload & AI music generation!")
+    print("  * Features   : Single Studio + Multi-Video Batch Processing")
+    print("  * Persist    : State preserved across page refreshes")
     print("=" * 60 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

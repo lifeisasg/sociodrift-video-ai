@@ -214,15 +214,20 @@ def main() -> int:
         # Convert to 16-bit PCM for universal player compatibility
         pcm16 = (waveform * 32767).astype(np.int16)
 
-        wav_path = out_dir / f"{scene_id}.wav"
+        stem = Path(data.get("filepath", "")).stem if data.get("filepath") else json_path.stem
+        wav_path = out_dir / f"{stem}_{scene_id}.wav"
         scipy.io.wavfile.write(str(wav_path), sampling_rate, pcm16)
+        # Also maintain generic scene file for backward compatibility
+        scipy.io.wavfile.write(str(out_dir / f"{scene_id}.wav"), sampling_rate, pcm16)
         logger.info("Saved scene audio: %s", wav_path)
 
         generated_audio_paths.append(wav_path)
         all_audio_chunks.append(pcm16)
 
     # Stitch all scene audio chunks into a complete continuous soundtrack with crossfades
-    full_soundtrack_path = out_dir / "final_soundtrack.wav"
+    stem = Path(data.get("filepath", "")).stem if data.get("filepath") else json_path.stem
+    full_soundtrack_path = out_dir / f"{stem}_soundtrack.wav"
+    legacy_soundtrack_path = out_dir / "final_soundtrack.wav"
     if generated_audio_paths and stitch_audio_with_crossfade:
         logger.info(
             "Stitching %d scenes with %dms crossfades and %dms smooth ending fade-out...",
@@ -237,14 +242,19 @@ def main() -> int:
                 crossfade_ms=args.crossfade_ms,
                 ending_fade_out_ms=args.fade_out_ms,
             )
+            # Copy to generic final_soundtrack.wav
+            import shutil
+            shutil.copyfile(full_soundtrack_path, legacy_soundtrack_path)
         except Exception as exc:
             logger.warning("PyDub crossfading fallback to simple concat: %s", exc)
             if all_audio_chunks:
                 full_soundtrack = np.concatenate(all_audio_chunks)
                 scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+                scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
     elif all_audio_chunks:
         full_soundtrack = np.concatenate(all_audio_chunks)
         scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+        scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
         logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
 
     # Merge audio back into original input video with 100% lossless video stream copying
