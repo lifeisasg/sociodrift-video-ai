@@ -1,0 +1,15 @@
+# =====================================================================
+# SocioDrift Video AI - Optional Web Studio & Neural Music Synthesis
+# =====================================================================
+
+# Interactive Web Studio & Batch Processing Queue
+fastapi==0.128.8
+uvicorn==0.39.0
+python-multipart==0.0.20
+pydub==0.25.1
+imageio-ffmpeg==0.6.0
+
+# Meta MusicGen Neural Audio Synthesis (Apple Silicon MPS / CUDA / CPU)
+torch==2.8.0
+transformers==4.57.6
+scipy==1.13.1

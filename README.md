@@ -216,6 +216,7 @@ sociodrift-video-ai/
    pip install --upgrade pip
    pip install -r requirements.txt
    ```
+   *(Installs core Video AI dependencies and pytest in ~5 seconds. To run the optional Web Studio & Meta MusicGen, also run `pip install -r requirements-studio.txt`)*
 
 5. (Optional) Generate the sample video fixtures:
    ```bash
