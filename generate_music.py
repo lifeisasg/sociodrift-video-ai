@@ -13,6 +13,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+SRC_DIR = Path(__file__).resolve().parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+try:
+    from sociodrift.audio_stitcher import stitch_audio_with_crossfade
+except ImportError:
+    stitch_audio_with_crossfade = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("musicgen")
 
@@ -38,6 +47,18 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="facebook/musicgen-small",
         help="Hugging Face model ID (default: facebook/musicgen-small)",
+    )
+    parser.add_argument(
+        "--crossfade-ms",
+        type=int,
+        default=500,
+        help="Crossfade overlap in milliseconds between adjacent scenes (default: 500)",
+    )
+    parser.add_argument(
+        "--fade-out-ms",
+        type=int,
+        default=1000,
+        help="Ending fade-out in milliseconds to prevent abrupt ending (default: 1000)",
     )
     parser.add_argument(
         "--merge-video",
@@ -167,10 +188,29 @@ def main() -> int:
         generated_audio_paths.append(wav_path)
         all_audio_chunks.append(pcm16)
 
-    # Stitch all scene audio chunks into a complete continuous soundtrack
-    if all_audio_chunks:
+    # Stitch all scene audio chunks into a complete continuous soundtrack with crossfades
+    full_soundtrack_path = out_dir / "final_soundtrack.wav"
+    if generated_audio_paths and stitch_audio_with_crossfade:
+        logger.info(
+            "Stitching %d scenes with %dms crossfades and %dms smooth ending fade-out...",
+            len(generated_audio_paths),
+            args.crossfade_ms,
+            args.fade_out_ms,
+        )
+        try:
+            stitch_audio_with_crossfade(
+                scene_audio_paths=generated_audio_paths,
+                output_path=full_soundtrack_path,
+                crossfade_ms=args.crossfade_ms,
+                ending_fade_out_ms=args.fade_out_ms,
+            )
+        except Exception as exc:
+            logger.warning("PyDub crossfading fallback to simple concat: %s", exc)
+            if all_audio_chunks:
+                full_soundtrack = np.concatenate(all_audio_chunks)
+                scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+    elif all_audio_chunks:
         full_soundtrack = np.concatenate(all_audio_chunks)
-        full_soundtrack_path = out_dir / "final_soundtrack.wav"
         scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
         logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
 
