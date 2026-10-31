@@ -45,11 +45,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = BASE_DIR / "outputs" / "uploads"
-AUDIO_DIR = BASE_DIR / "outputs" / "audio"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+UPLOAD_DIR = OUTPUTS_DIR / "uploads"
+AUDIO_DIR = OUTPUTS_DIR / "audio"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
+app.mount("/static/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs_root")
 app.mount("/static/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/static/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
 
@@ -103,9 +105,14 @@ async def generate_music(payload: dict):
         logger.error("Music generation failed: %s", exc.stderr)
         raise HTTPException(status_code=500, detail=exc.stderr or "Generation failed")
 
+    final_video_name = f"{Path(filename).stem}_with_ai_music.mp4"
+    final_video_path = OUTPUTS_DIR / final_video_name
+    final_video_url = f"/static/outputs/{final_video_name}" if final_video_path.exists() else None
+
     return {
         "status": "SUCCESS",
         "soundtrack_url": "/static/audio/final_soundtrack.wav",
+        "final_video_url": final_video_url,
         "scenes": [
             {"scene_id": f"scene-{i+1}", "audio_url": f"/static/audio/scene-{i+1}.wav"}
             for i in range(len(payload.get("scenes", [])))
@@ -586,7 +593,29 @@ HTML_CONTENT = """<!DOCTYPE html>
           }
         });
 
-        btn.innerHTML = `<span>✅ Music Generated! Ready to Play</span>`;
+        // Switch video to final synchronized video with AI music
+        if (data.final_video_url) {
+          const video = document.getElementById('videoPlayer');
+          video.src = data.final_video_url + '?t=' + Date.now();
+          video.load();
+          video.play().catch(() => {});
+
+          let dlBtn = document.getElementById('downloadVideoBtn');
+          if (!dlBtn) {
+            dlBtn = document.createElement('a');
+            dlBtn.id = 'downloadVideoBtn';
+            dlBtn.className = 'btn btn-secondary';
+            dlBtn.style.marginTop = '0.75rem';
+            dlBtn.style.display = 'block';
+            dlBtn.style.textAlign = 'center';
+            dlBtn.textContent = '⬇ Download Final Video (100% Quality Preserved)';
+            video.parentElement.after(dlBtn);
+          }
+          dlBtn.href = data.final_video_url;
+          dlBtn.download = currentData.filename.replace(/\.[^/.]+$/, "") + "_with_ai_music.mp4";
+        }
+
+        btn.innerHTML = `<span>✅ Music Synced & Merged with Video!</span>`;
         btn.disabled = false;
         btn.style.background = '#10b981';
 

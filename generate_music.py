@@ -19,8 +19,10 @@ if str(SRC_DIR) not in sys.path:
 
 try:
     from sociodrift.audio_stitcher import stitch_audio_with_crossfade
+    from sociodrift.video_audio_merger import merge_video_and_audio
 except ImportError:
     stitch_audio_with_crossfade = None
+    merge_video_and_audio = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("musicgen")
@@ -111,9 +113,13 @@ def main() -> int:
         device = "cpu"
         logger.info("Using CPU for neural music generation.")
 
-    logger.info("Loading Meta MusicGen model: %s ... (one-time download)", args.model)
-    processor = AutoProcessor.from_pretrained(args.model)
-    model = MusicgenForConditionalGeneration.from_pretrained(args.model)
+    logger.info("Loading Meta MusicGen model: %s ...", args.model)
+    try:
+        processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
+        model = MusicgenForConditionalGeneration.from_pretrained(args.model, local_files_only=True)
+    except Exception:
+        processor = AutoProcessor.from_pretrained(args.model)
+        model = MusicgenForConditionalGeneration.from_pretrained(args.model)
     model.to(device)
 
     sampling_rate = model.config.audio_encoder.sampling_rate
@@ -241,12 +247,30 @@ def main() -> int:
         scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
         logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
 
+    # Merge audio back into original input video with 100% lossless video stream copying
+    final_video_path = None
+    input_video_path = Path(data.get("filepath", "")).resolve()
+    if input_video_path.exists() and merge_video_and_audio:
+        final_video_path = out_dir.parent / f"{input_video_path.stem}_with_ai_music.mp4"
+        try:
+            merge_video_and_audio(
+                video_path=input_video_path,
+                audio_path=full_soundtrack_path,
+                output_path=final_video_path,
+            )
+            logger.info("Created synchronized final video: %s", final_video_path)
+        except Exception as exc:
+            logger.warning("Could not merge audio with video: %s", exc)
+
     print("\n" + "=" * 60)
     print("      META MUSICGEN AI AUDIO GENERATION COMPLETE!      ")
     print("=" * 60)
     for p in generated_audio_paths:
         print(f"  * Scene Track : {p}")
     print(f"  * Full Score  : {full_soundtrack_path}")
+    if final_video_path and final_video_path.exists():
+        print(f"  * FINAL VIDEO : {final_video_path}")
+        print("    (Original video quality 100% preserved bit-for-bit)")
     print("=" * 60 + "\n")
 
     return 0
