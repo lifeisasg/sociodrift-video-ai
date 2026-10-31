@@ -471,6 +471,29 @@ Batch summary JSON saved to: outputs/batch_summary.json
 
 ## 18. Known Limitations
 
-1. **Audio Synthesis Not Included in Standalone Slice**: The parent SocioDrift platform generates raw `.wav` audio using Meta's `mlx-audiogen` (MusicGen) on Apple Silicon. This standalone slice packages the video AI and prompt conditioning engine; audio generation is decoupled to keep dependencies lightweight and fully cross-platform.
-2. **Fixed Interval vs Adaptive Cut Segmentation**: The CLI divides videos into configurable fixed-length temporal segments (e.g. 3.0s). The full SocioDrift platform also supports adaptive scene cut detection based on SSIM and histogram spikes, which can be toggled via custom parameters.
-3. **CPU-Bound Optical Flow**: Gunner Farneback dense optical flow runs on CPU via OpenCV. On 4K 60FPS videos, downscaling frames (internally downscaled to 320x180) ensures high speed (~0.05s per frame), but GPU acceleration via CUDA/Metal can be integrated for ultra-high-throughput enterprise pipelines.
+1. **Fixed Interval vs Adaptive Cut Segmentation**: The CLI divides videos into configurable fixed-length temporal segments (e.g. 3.0s). The full SocioDrift platform also supports adaptive scene cut detection based on SSIM and histogram spikes.
+2. **CPU-Bound Optical Flow**: Gunner Farneback dense optical flow runs on CPU via OpenCV. On 4K 60FPS videos, downscaling frames (internally downscaled to 320x180) ensures high speed (~0.05s per frame), but GPU acceleration via CUDA/Metal can be integrated for ultra-high-throughput enterprise pipelines.
+
+---
+
+## 19. Interactive Web Studio & Neural Music Synthesis
+
+In addition to the core CLI, this repository includes an interactive full-stack Web Studio and real Meta MusicGen neural audio synthesis:
+
+### Launch Interactive Web Studio:
+```bash
+python web_app.py
+```
+Open **`http://localhost:8000`** in any browser.
+
+**Features:**
+- **Official 3D SocioDrift Logo**: Integrated in the header with a dark theme aesthetic.
+- **Single Video Studio**: Drag & drop video, inspect scene metrics, synthesize AI music, preview synchronized video, and download final video (100% lossless video stream copying).
+- **Multi-Video Batch Queue**: Select multiple clips, monitor sequential processing in real time with progress bars, and download audio/video as each item completes.
+- **Refresh State Persistence**: Analysis and batch results persist in `localStorage` across browser reloads until reset.
+
+### Standalone Neural Audio Synthesis (CLI):
+```bash
+python generate_music.py --json outputs/sample_video.json --merge-video
+```
+Synthesizes `.wav` waveforms with Meta MusicGen, applies PyDub 500ms equal-power crossfading, -16 dBFS loudness normalization, 1000ms ending fade-out, and multiplexes into `outputs/<stem>_with_ai_music.mp4` with bit-for-bit video quality preservation.
