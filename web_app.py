@@ -26,7 +26,7 @@ if str(SRC_DIR) not in sys.path:
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sociodrift.pipeline import VideoAIPipeline
@@ -47,12 +47,22 @@ app.add_middleware(
 OUTPUTS_DIR = BASE_DIR / "outputs"
 UPLOAD_DIR = OUTPUTS_DIR / "uploads"
 AUDIO_DIR = OUTPUTS_DIR / "audio"
+STATIC_DIR = BASE_DIR / "static"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount("/static/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs_root")
 app.mount("/static/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 app.mount("/static/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
+
+
+@app.get("/static/logo.png")
+async def get_logo():
+    logo_path = STATIC_DIR / "logo.png"
+    if logo_path.exists():
+        return FileResponse(logo_path, media_type="image/png")
+    raise HTTPException(status_code=404, detail="Logo not found")
 
 pipeline = VideoAIPipeline(segment_duration=3.0, demo_mode=False)
 
@@ -199,6 +209,7 @@ HTML_CONTENT = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SocioDrift – Video AI & Music Co-Pilot Studio</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -227,7 +238,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     }
     header {
       border-bottom: 1px solid var(--card-border);
-      padding: 1.15rem 2.5rem;
+      padding: 0.95rem 2.5rem;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -237,19 +248,47 @@ HTML_CONTENT = """<!DOCTYPE html>
       top: 0;
       z-index: 50;
     }
-    .logo-group { display: flex; align-items: center; gap: 0.85rem; }
-    .logo-badge {
-      background: var(--accent-grad);
-      color: white;
-      font-weight: 800;
-      font-size: 1.1rem;
-      padding: 0.35rem 0.75rem;
-      border-radius: 8px;
-      letter-spacing: -0.5px;
-      box-shadow: 0 0 20px var(--accent-glow);
+    .logo-group {
+      display: flex;
+      align-items: center;
+      gap: 1.1rem;
     }
-    .brand-title { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.3px; }
-    .brand-subtitle { font-size: 0.78rem; color: var(--text-muted); font-weight: 500; }
+    .logo-link {
+      display: flex;
+      align-items: center;
+      text-decoration: none;
+    }
+    .brand-logo-img {
+      height: 48px;
+      width: auto;
+      object-fit: contain;
+      filter: drop-shadow(0 0 16px rgba(168, 85, 247, 0.45)) drop-shadow(0 1px 2px rgba(255, 255, 255, 0.4));
+      transition: transform 0.25s ease, filter 0.25s ease;
+      cursor: pointer;
+    }
+    .brand-logo-img:hover {
+      transform: scale(1.04);
+      filter: drop-shadow(0 0 24px rgba(168, 85, 247, 0.75)) drop-shadow(0 1px 4px rgba(255, 255, 255, 0.6));
+    }
+    .brand-tagline-container {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      border-left: 1px solid var(--card-border);
+      padding-left: 1rem;
+    }
+    .studio-pill {
+      font-size: 0.68rem;
+      font-weight: 800;
+      letter-spacing: 1.2px;
+      color: #c7d2fe;
+      background: rgba(99, 102, 241, 0.2);
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      padding: 1px 7px;
+      border-radius: 4px;
+      width: fit-content;
+    }
+    .brand-subtitle { font-size: 0.74rem; color: var(--text-muted); font-weight: 500; }
     
     .nav-tabs {
       display: flex;
@@ -572,10 +611,12 @@ HTML_CONTENT = """<!DOCTYPE html>
 
   <header>
     <div class="logo-group">
-      <div class="logo-badge">SD</div>
-      <div>
-        <div class="brand-title">SocioDrift Studio</div>
-        <div class="brand-subtitle">AI Video Analysis & Meta MusicGen Co-Pilot</div>
+      <a href="/" class="logo-link" title="SocioDrift Studio Home">
+        <img src="/static/logo.png" alt="SocioDrift" class="brand-logo-img">
+      </a>
+      <div class="brand-tagline-container">
+        <span class="studio-pill">STUDIO</span>
+        <span class="brand-subtitle">AI Video & Neural Music Co-Pilot</span>
       </div>
     </div>
 
