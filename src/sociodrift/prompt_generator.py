@@ -45,7 +45,7 @@ EMOTION_STYLE_MAP: dict[str, tuple[str, str, str]] = {
     "romantic": ("romantic cinematic", "piano", "piano, legato strings, soft harp accents"),
     "emotional": ("emotional cinematic", "piano", "expressive piano, warm strings, soft ambience"),
     "mysterious": ("mysterious ambient", "cinematic textures", "low drones, glassy pads, sparse piano"),
-    "suspense": ("suspense score", "cinematic pulses", "low drones, ticking pulses, muted percussion"),
+    "suspense": ("dark horror suspense", "dissonant strings and low sub-bass drone", "low sub-bass drones, eerie dissonant string textures, clock ticking, unsettling atmospheric dread"),
     "action": ("action cinematic", "percussion", "driving drums, pulsing bass, sharp string ostinato"),
     "energetic": ("energetic cinematic pop", "synth", "pulsing synth, bright percussion, rhythmic strings"),
 }

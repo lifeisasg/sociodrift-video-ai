@@ -135,11 +135,38 @@ def main() -> int:
         energy = music_cue.get("energy", 50)
         description = scene.get("description", "")
 
-        # Target prompt that MusicGen understands best
-        prompt_text = (
-            f"{style} soundtrack, {mood} mood, {instrument}, "
-            f"{tempo} BPM, {energy}% intensity, {description}, high quality instrumental"
-        )
+        # Mood-specific sonic conditioning for Meta MusicGen
+        if mood == "suspense":
+            prompt_text = (
+                f"dark horror cinematic suspense score, eerie low sub-bass drones, "
+                f"tense ticking clock, unsettling dissonant strings, ominous atmosphere, "
+                f"slow creeping dread, {tempo} BPM, dark horror film soundtrack"
+            )
+        elif mood == "mysterious":
+            prompt_text = (
+                f"mysterious ambient cinematic soundtrack, glassy eerie pads, sparse dark piano, "
+                f"low drones, enigmatic subtle textures, {tempo} BPM, mystery film score"
+            )
+        elif mood == "action":
+            prompt_text = (
+                f"epic action cinematic soundtrack, driving heavy drums, pulsing bass, "
+                f"fast rhythmic strings ostinato, intense dynamic chase, {tempo} BPM, high energy"
+            )
+        elif mood == "romantic":
+            prompt_text = (
+                f"warm romantic cinematic soundtrack, expressive emotional piano, "
+                f"legato strings, soft acoustic harp, heartwarming melody, {tempo} BPM"
+            )
+        elif mood == "calm":
+            prompt_text = (
+                f"peaceful ambient daylight cinematic music, soft warm felt piano, "
+                f"gentle airy pads, quiet relaxing background, {tempo} BPM, clean mix"
+            )
+        else:
+            prompt_text = (
+                f"{style} soundtrack, {mood} mood, {instrument}, "
+                f"{tempo} BPM, {energy}% intensity, {description}, high quality instrumental"
+            )
 
         logger.info(
             "--- Synthesizing %s | Mood: %s | Style: %s | %d BPM (%.1fs) ---",

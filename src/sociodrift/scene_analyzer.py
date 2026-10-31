@@ -314,22 +314,30 @@ class SceneAnalyzer:
         label_weights = {l.label: l.confidence for l in labels}
         motion = _clamp(metrics.optical_flow / 4.5)
         brightness = _clamp(metrics.average_brightness / 180.0)
-        darkness = _clamp((105 - metrics.average_brightness) / 105.0)
+        darkness = _clamp((110.0 - metrics.average_brightness) / 110.0)
         saturation = _clamp(metrics.average_saturation / 160.0)
         complexity = _clamp(metrics.visual_complexity / 0.16)
         instability = 1.0 - metrics.scene_stability
 
+        # Calm and peaceful require ambient daylight; darkness represents tension, dread, or night
+        light_presence = _clamp((metrics.average_brightness - 42.0) / 85.0)
+
+        # Slow motion in dark imagery creates creeping dread / horror suspense
+        slow_dread = (1.0 - motion) * 0.35
+        darkness_boost = darkness * 0.58
+        night_weight = label_weights.get("night", 0.0) * 0.25
+
         scores = {
-            "calm": (1 - motion) * 0.38 + metrics.scene_stability * 0.32 + brightness * 0.18 + (1 - complexity) * 0.12,
-            "peaceful": (1 - motion) * 0.30 + brightness * 0.24 + saturation * 0.14 + label_weights.get("nature", 0) * 0.24 + metrics.scene_stability * 0.08,
-            "happy": brightness * 0.34 + saturation * 0.32 + label_weights.get("travel", 0) * 0.16,
+            "calm": ((1 - motion) * 0.44 + metrics.scene_stability * 0.36 + (1 - complexity) * 0.20) * light_presence,
+            "peaceful": ((1 - motion) * 0.34 + saturation * 0.26 + label_weights.get("nature", 0) * 0.24 + metrics.scene_stability * 0.16) * light_presence,
+            "happy": (brightness * 0.34 + saturation * 0.32 + label_weights.get("travel", 0) * 0.16) * light_presence,
             "travel": label_weights.get("travel", 0) * 0.42 + brightness * 0.20 + saturation * 0.16 + motion * 0.22,
-            "dramatic": darkness * 0.25 + complexity * 0.22 + instability * 0.18 + motion * 0.18 + label_weights.get("city", 0) * 0.17,
+            "dramatic": darkness * 0.32 + complexity * 0.24 + instability * 0.18 + motion * 0.18 + label_weights.get("city", 0) * 0.17,
             "epic": brightness * 0.16 + saturation * 0.16 + motion * 0.26 + complexity * 0.20 + label_weights.get("landscape", 0) * 0.22,
-            "romantic": brightness * 0.20 + saturation * 0.18 + (1 - motion) * 0.30 + label_weights.get("sunset", 0) * 0.32,
+            "romantic": (brightness * 0.20 + saturation * 0.24 + (1 - motion) * 0.24 + label_weights.get("sunset", 0) * 0.32) * max(0.2, light_presence),
             "emotional": (1 - motion) * 0.26 + darkness * 0.16 + metrics.scene_stability * 0.24 + complexity * 0.10 + label_weights.get("people", 0) * 0.24,
-            "mysterious": darkness * 0.36 + (1 - saturation) * 0.16 + complexity * 0.16 + metrics.scene_stability * 0.12 + label_weights.get("night", 0) * 0.20,
-            "suspense": darkness * 0.28 + instability * 0.30 + complexity * 0.18 + motion * 0.14 + label_weights.get("night", 0) * 0.10,
+            "mysterious": darkness_boost * 0.85 + (1 - saturation) * 0.22 + complexity * 0.18 + metrics.scene_stability * 0.14 + night_weight,
+            "suspense": darkness_boost + slow_dread + night_weight + complexity * 0.15,
             "action": motion * 0.46 + instability * 0.18 + complexity * 0.16 + label_weights.get("action", 0) * 0.20,
             "energetic": motion * 0.34 + saturation * 0.25 + brightness * 0.15 + label_weights.get("sports", 0) * 0.26,
         }
