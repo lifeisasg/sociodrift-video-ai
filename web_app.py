@@ -419,7 +419,10 @@ HTML_CONTENT = """<!DOCTYPE html>
           <div class="audio-deck" id="soundtrackDeck" style="display: none;">
             <div class="deck-header">
               <div class="deck-title">🎶 Complete Synced Soundtrack</div>
-              <span class="badge badge-calm">9.0s • 32kHz</span>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <span class="badge badge-calm">9.0s • 32kHz</span>
+                <a id="downloadSoundtrackBtn" class="pill" style="color: #6ee7b7; border-color: rgba(16, 185, 129, 0.4); text-decoration: none; cursor: pointer;">⬇ Download WAV</a>
+              </div>
             </div>
             <audio id="soundtrackPlayer" controls></audio>
           </div>
@@ -431,7 +434,10 @@ HTML_CONTENT = """<!DOCTYPE html>
         <div class="panel">
           <div class="panel-title">
             <span>Detected Scene Segments</span>
-            <span id="sceneCountBadge" class="badge badge-role">0 Scenes</span>
+            <div style="display: flex; gap: 0.5rem; align-items: center;">
+              <span id="sceneCountBadge" class="badge badge-role">0 Scenes</span>
+              <a id="downloadJsonBtn" class="pill" style="color:#c7d2fe; text-decoration:none; cursor:pointer;" onclick="downloadJson()">⬇ Export JSON</a>
+            </div>
           </div>
 
           <div class="scene-list" id="sceneList">
@@ -552,11 +558,26 @@ HTML_CONTENT = """<!DOCTYPE html>
           <div class="prompt-box"><strong>Generated AI Prompt:</strong>\n${scene.prompt}</div>
 
           <div id="audioRow_${scene.scene_id}" style="margin-top:0.75rem; display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
+              <span style="font-size:0.75rem; font-weight:700; color:#a5b4fc;">Scene Audio:</span>
+              <a id="dl_${scene.scene_id}" class="pill" style="font-size:0.68rem; color:#93c5fd; text-decoration:none;" download="${scene.scene_id}.wav">⬇ Download WAV</a>
+            </div>
             <audio id="audio_${scene.scene_id}" controls style="width:100%; height:32px;"></audio>
           </div>
         `;
         sceneList.appendChild(card);
       });
+    }
+
+    function downloadJson() {
+      if (!currentData) return;
+      const blob = new Blob([JSON.stringify(currentData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (currentData.filename ? currentData.filename.replace(/\\.[^/.]+$/, "") : "analysis") + ".json";
+      a.click();
+      URL.revokeObjectURL(url);
     }
 
     async function generateMusic() {
@@ -581,7 +602,14 @@ HTML_CONTENT = """<!DOCTYPE html>
         const deck = document.getElementById('soundtrackDeck');
         deck.style.display = 'block';
         const stPlayer = document.getElementById('soundtrackPlayer');
-        stPlayer.src = data.soundtrack_url + '?t=' + Date.now();
+        const stUrl = data.soundtrack_url + '?t=' + Date.now();
+        stPlayer.src = stUrl;
+        
+        const dlSoundtrack = document.getElementById('downloadSoundtrackBtn');
+        if (dlSoundtrack) {
+          dlSoundtrack.href = data.soundtrack_url;
+          dlSoundtrack.download = currentData.filename.replace(/\.[^/.]+$/, "") + "_soundtrack.wav";
+        }
 
         // Reveal scene audios
         data.scenes.forEach(s => {
@@ -590,6 +618,10 @@ HTML_CONTENT = """<!DOCTYPE html>
             row.style.display = 'block';
             const audioElem = document.getElementById(`audio_${s.scene_id}`);
             audioElem.src = s.audio_url + '?t=' + Date.now();
+            const dlScene = document.getElementById(`dl_${s.scene_id}`);
+            if (dlScene) {
+              dlScene.href = s.audio_url;
+            }
           }
         });
 
@@ -604,10 +636,13 @@ HTML_CONTENT = """<!DOCTYPE html>
           if (!dlBtn) {
             dlBtn = document.createElement('a');
             dlBtn.id = 'downloadVideoBtn';
-            dlBtn.className = 'btn btn-secondary';
-            dlBtn.style.marginTop = '0.75rem';
-            dlBtn.style.display = 'block';
-            dlBtn.style.textAlign = 'center';
+            dlBtn.className = 'btn';
+            dlBtn.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+            dlBtn.style.marginTop = '0.85rem';
+            dlBtn.style.display = 'flex';
+            dlBtn.style.justifyContent = 'center';
+            dlBtn.style.boxShadow = '0 6px 20px rgba(16, 185, 129, 0.4)';
+            dlBtn.style.textDecoration = 'none';
             dlBtn.textContent = '⬇ Download Final Video (100% Quality Preserved)';
             video.parentElement.after(dlBtn);
           }
