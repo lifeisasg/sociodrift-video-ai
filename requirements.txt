@@ -1,0 +1,7 @@
+# Direct pinned dependencies for SocioDrift Video AI Pipeline
+# Compatible with Python 3.9+ on macOS, Linux, and Windows
+
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pytest==8.3.3
+python-dotenv==1.0.1
