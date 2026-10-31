@@ -1,0 +1,189 @@
+"""Generate real cinematic music waveforms from Video AI prompts using Meta's MusicGen.
+
+Uses Meta's official open-source musicgen-small model via Hugging Face Transformers.
+Leverages Apple Silicon GPU acceleration (MPS) when available, or CPU.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("musicgen")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate real .wav music tracks from SocioDrift Video AI prompts using Meta MusicGen."
+    )
+    parser.add_argument(
+        "--json",
+        type=str,
+        default="outputs/sample_video.json",
+        help="Path to pipeline output JSON file (default: outputs/sample_video.json)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="outputs/audio",
+        help="Directory to save generated .wav files (default: outputs/audio)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="facebook/musicgen-small",
+        help="Hugging Face model ID (default: facebook/musicgen-small)",
+    )
+    parser.add_argument(
+        "--merge-video",
+        action="store_true",
+        help="Automatically merge generated audio back into the source video using FFmpeg",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    try:
+        import numpy as np
+        import scipy.io.wavfile
+        import torch
+        from transformers import AutoProcessor, MusicgenForConditionalGeneration
+    except ImportError as exc:
+        logger.error(
+            "Missing dependencies for neural audio synthesis (%s). "
+            "Please run: pip install torch transformers scipy",
+            exc,
+        )
+        return 1
+
+    json_path = Path(args.json).resolve()
+    if not json_path.exists():
+        logger.error("JSON file not found: %s", json_path)
+        return 1
+
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    scenes = data.get("scenes", [])
+    if not scenes:
+        logger.error("No scenes found in %s", json_path)
+        return 1
+
+    out_dir = Path(args.output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine hardware acceleration
+    if torch.backends.mps.is_available():
+        device = "mps"
+        logger.info("Using Apple Silicon Metal Performance Shaders (MPS) GPU acceleration!")
+    elif torch.cuda.is_available():
+        device = "cuda"
+        logger.info("Using NVIDIA CUDA GPU acceleration!")
+    else:
+        device = "cpu"
+        logger.info("Using CPU for neural music generation.")
+
+    logger.info("Loading Meta MusicGen model: %s ... (one-time download)", args.model)
+    processor = AutoProcessor.from_pretrained(args.model)
+    model = MusicgenForConditionalGeneration.from_pretrained(args.model)
+    model.to(device)
+
+    sampling_rate = model.config.audio_encoder.sampling_rate
+    generated_audio_paths: list[Path] = []
+    all_audio_chunks: list[np.ndarray] = []
+
+    logger.info("Generating music for %d scenes...", len(scenes))
+
+    for scene in scenes:
+        scene_id = scene["scene_id"]
+        mood = scene["mood"]
+        duration = float(scene.get("duration", 3.0))
+
+        # We construct a dense, effective prompt for MusicGen from the cue
+        music_cue = scene.get("music_cue", {})
+        style = music_cue.get("music_style", "cinematic")
+        instrument = music_cue.get("primary_instrument", "piano")
+        tempo = music_cue.get("tempo", 110)
+        energy = music_cue.get("energy", 50)
+        description = scene.get("description", "")
+
+        # Target prompt that MusicGen understands best
+        prompt_text = (
+            f"{style} soundtrack, {mood} mood, {instrument}, "
+            f"{tempo} BPM, {energy}% intensity, {description}, high quality instrumental"
+        )
+
+        logger.info(
+            "--- Synthesizing %s | Mood: %s | Style: %s | %d BPM (%.1fs) ---",
+            scene_id.upper(),
+            mood.upper(),
+            style,
+            tempo,
+            duration,
+        )
+
+        # 50 tokens per second of audio
+        max_tokens = int(max(duration, 1.5) * 50)
+
+        inputs = processor(
+            text=[prompt_text],
+            padding=True,
+            return_tensors="pt",
+        ).to(device)
+
+        with torch.no_grad():
+            audio_values = model.generate(**inputs, max_new_tokens=max_tokens)
+
+        # Convert tensor to numpy 1D waveform
+        waveform = audio_values[0, 0].cpu().numpy().astype(np.float32)
+
+        # Truncate or match exact segment duration
+        target_samples = int(duration * sampling_rate)
+        if len(waveform) > target_samples:
+            waveform = waveform[:target_samples]
+        elif len(waveform) < target_samples:
+            pad = np.zeros(target_samples - len(waveform), dtype=np.float32)
+            waveform = np.concatenate([waveform, pad])
+
+        # Normalize audio volume to prevent digital clipping
+        max_val = np.max(np.abs(waveform))
+        if max_val > 0:
+            waveform = (waveform / max_val) * 0.95
+
+        # Convert to 16-bit PCM for universal player compatibility
+        pcm16 = (waveform * 32767).astype(np.int16)
+
+        wav_path = out_dir / f"{scene_id}.wav"
+        scipy.io.wavfile.write(str(wav_path), sampling_rate, pcm16)
+        logger.info("Saved scene audio: %s", wav_path)
+
+        generated_audio_paths.append(wav_path)
+        all_audio_chunks.append(pcm16)
+
+    # Stitch all scene audio chunks into a complete continuous soundtrack
+    if all_audio_chunks:
+        full_soundtrack = np.concatenate(all_audio_chunks)
+        full_soundtrack_path = out_dir / "final_soundtrack.wav"
+        scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+        logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
+
+    print("\n" + "=" * 60)
+    print("      META MUSICGEN AI AUDIO GENERATION COMPLETE!      ")
+    print("=" * 60)
+    for p in generated_audio_paths:
+        print(f"  * Scene Track : {p}")
+    print(f"  * Full Score  : {full_soundtrack_path}")
+    print("=" * 60 + "\n")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
