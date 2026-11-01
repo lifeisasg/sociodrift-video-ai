@@ -70,21 +70,45 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def generate_procedural_scene_audio(scene: dict, duration: float, sampling_rate: int = 32000):
+    """Generate harmonic procedural cinematic audio for cloud hosts with constrained RAM (Render Free)."""
+    import numpy as np
+
+    t = np.linspace(0, duration, int(sampling_rate * duration), endpoint=False)
+    mood = scene.get("mood", "calm").lower()
+    cue = scene.get("music_cue", {})
+    tempo = float(cue.get("tempo", 110))
+    beat_freq = tempo / 60.0
+
+    if "suspense" in mood or "horror" in mood:
+        # Dark low drone + dissonant tension chords
+        f1, f2, f3 = 55.0, 58.27, 110.0
+        wave = 0.4 * np.sin(2 * np.pi * f1 * t) + 0.3 * np.sin(2 * np.pi * f2 * t) + 0.2 * np.sin(2 * np.pi * f3 * t)
+        envelope = 0.7 + 0.3 * np.sin(2 * np.pi * 0.2 * t)
+        wave = wave * envelope
+    elif "energetic" in mood or "action" in mood:
+        # Driving synth bass + rhythm pulse
+        f1, f2 = 110.0, 220.0
+        rhythm = (0.5 * (1 + np.sin(2 * np.pi * beat_freq * t))) ** 2
+        wave = (0.4 * np.sin(2 * np.pi * f1 * t) + 0.3 * np.sin(2 * np.pi * f2 * t)) * rhythm
+    else:
+        # Calm / Peaceful warm ambient chord
+        f1, f2, f3 = 130.81, 164.81, 196.00
+        wave = 0.35 * np.sin(2 * np.pi * f1 * t) + 0.25 * np.sin(2 * np.pi * f2 * t) + 0.2 * np.sin(2 * np.pi * f3 * t)
+        wave = wave * (0.8 + 0.2 * np.sin(2 * np.pi * 0.1 * t))
+
+    fade_len = int(sampling_rate * 0.05)
+    if len(wave) > 2 * fade_len:
+        fade_in = np.linspace(0, 1, fade_len)
+        fade_out = np.linspace(1, 0, fade_len)
+        wave[:fade_len] *= fade_in
+        wave[-fade_len:] *= fade_out
+
+    return wave.astype(np.float32)
+
+
 def main() -> int:
     args = parse_args()
-
-    try:
-        import numpy as np
-        import scipy.io.wavfile
-        import torch
-        from transformers import AutoProcessor, MusicgenForConditionalGeneration
-    except ImportError as exc:
-        logger.error(
-            "Missing dependencies for neural audio synthesis (%s). "
-            "Please run: pip install torch transformers scipy",
-            exc,
-        )
-        return 1
 
     json_path = Path(args.json).resolve()
     if not json_path.exists():
@@ -102,27 +126,45 @@ def main() -> int:
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Determine hardware acceleration
-    if torch.backends.mps.is_available():
-        device = "mps"
-        logger.info("Using Apple Silicon Metal Performance Shaders (MPS) GPU acceleration!")
-    elif torch.cuda.is_available():
-        device = "cuda"
-        logger.info("Using NVIDIA CUDA GPU acceleration!")
-    else:
-        device = "cpu"
-        logger.info("Using CPU for neural music generation.")
+    model = None
+    processor = None
+    device = "cpu"
+    sampling_rate = 32000
 
-    logger.info("Loading Meta MusicGen model: %s ...", args.model)
     try:
-        processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
-        model = MusicgenForConditionalGeneration.from_pretrained(args.model, local_files_only=True)
-    except Exception:
-        processor = AutoProcessor.from_pretrained(args.model)
-        model = MusicgenForConditionalGeneration.from_pretrained(args.model)
-    model.to(device)
+        import numpy as np
+        import scipy.io.wavfile
+        import torch
+        from transformers import AutoProcessor, MusicgenForConditionalGeneration
 
-    sampling_rate = model.config.audio_encoder.sampling_rate
+        # Determine hardware acceleration
+        if torch.backends.mps.is_available():
+            device = "mps"
+            logger.info("Using Apple Silicon Metal Performance Shaders (MPS) GPU acceleration!")
+        elif torch.cuda.is_available():
+            device = "cuda"
+            logger.info("Using NVIDIA CUDA GPU acceleration!")
+        else:
+            device = "cpu"
+            logger.info("Using CPU for neural music generation.")
+
+        logger.info("Loading Meta MusicGen model: %s ...", args.model)
+        try:
+            processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
+            model = MusicgenForConditionalGeneration.from_pretrained(args.model, local_files_only=True)
+        except Exception:
+            processor = AutoProcessor.from_pretrained(args.model)
+            model = MusicgenForConditionalGeneration.from_pretrained(args.model)
+        model.to(device)
+        sampling_rate = model.config.audio_encoder.sampling_rate
+    except Exception as exc:
+        import numpy as np
+        import scipy.io.wavfile
+        logger.warning(
+            "Neural audio synthesis not available (%s). "
+            "Using harmonic procedural audio synthesizer (lightweight cloud mode).",
+            exc,
+        )
     generated_audio_paths: list[Path] = []
     all_audio_chunks: list[np.ndarray] = []
 
@@ -183,20 +225,23 @@ def main() -> int:
             duration,
         )
 
-        # 50 tokens per second of audio
-        max_tokens = int(max(duration, 1.5) * 50)
+        if model is not None and processor is not None:
+            # 50 tokens per second of audio
+            max_tokens = int(max(duration, 1.5) * 50)
 
-        inputs = processor(
-            text=[prompt_text],
-            padding=True,
-            return_tensors="pt",
-        ).to(device)
+            inputs = processor(
+                text=[prompt_text],
+                padding=True,
+                return_tensors="pt",
+            ).to(device)
 
-        with torch.no_grad():
-            audio_values = model.generate(**inputs, max_new_tokens=max_tokens)
+            with torch.no_grad():
+                audio_values = model.generate(**inputs, max_new_tokens=max_tokens)
 
-        # Convert tensor to numpy 1D waveform
-        waveform = audio_values[0, 0].cpu().numpy().astype(np.float32)
+            # Convert tensor to numpy 1D waveform
+            waveform = audio_values[0, 0].cpu().numpy().astype(np.float32)
+        else:
+            waveform = generate_procedural_scene_audio(scene, duration, sampling_rate)
 
         # Truncate or match exact segment duration
         target_samples = int(duration * sampling_rate)

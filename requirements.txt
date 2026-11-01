@@ -1,13 +1,20 @@
 # =====================================================================
-# Direct pinned dependencies for SocioDrift Video AI Pipeline
-# (Core pipeline execution + 16 automated tests)
-# Installs in ~5 seconds with zero heavy GPU/PyTorch downloads.
+# SocioDrift Video AI Pipeline & Web Studio - Pinned Dependencies
 # =====================================================================
 
+# 1. Core Video AI Pipeline & Automated Tests
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
 pytest==8.3.3
 python-dotenv==1.0.1
 
-# For optional Interactive Web Studio & Neural MusicGen audio synthesis:
-# See requirements-studio.txt (or run: pip install -r requirements-studio.txt)
+# 2. Interactive Web Studio & Audio Multiplexing (Ready for Cloud & Render.com)
+fastapi==0.128.8
+uvicorn==0.39.0
+python-multipart==0.0.20
+pydub==0.25.1
+imageio-ffmpeg==0.6.0
+scipy==1.13.1
+
+# Note for GPU / Neural MusicGen synthesis:
+# To install Meta MusicGen transformer packages, see requirements-studio.txt
