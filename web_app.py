@@ -81,6 +81,24 @@ async def analyze_video(file: UploadFile = File(...)):
         result = pipeline.process_video(target_path, output_dir=OUTPUTS_DIR)
         result_dict = result.to_dict()
         result_dict["video_url"] = f"/static/uploads/{file.filename}"
+
+        # Compute dominant emotion from scenes
+        mood_counts = {}
+        for s in result.scenes:
+            m = (s.mood or "NEUTRAL").upper()
+            mood_counts[m] = mood_counts.get(m, 0) + 1
+        dom_mood = max(mood_counts, key=mood_counts.get) if mood_counts else "NEUTRAL"
+
+        result_dict["metadata"] = {
+            "duration_seconds": result.video_duration,
+            "fps": result.fps,
+            "total_frames": result.total_frames,
+            "resolution": result.resolution,
+        }
+        result_dict["summary"] = {
+            "dominant_emotion": dom_mood,
+            "total_scenes": len(result.scenes),
+        }
         return JSONResponse(result_dict)
     except Exception as exc:
         logger.error("Analysis failed: %s", exc)
@@ -153,6 +171,25 @@ async def batch_process_video(file: UploadFile = File(...)):
         stem = Path(file.filename).stem
         json_file = OUTPUTS_DIR / f"{stem}.json"
 
+        # Calculate dominant mood
+        mood_counts = {}
+        for s in result.scenes:
+            m = (s.mood or "NEUTRAL").upper()
+            mood_counts[m] = mood_counts.get(m, 0) + 1
+        dom_mood = max(mood_counts, key=mood_counts.get) if mood_counts else "NEUTRAL"
+
+        result_dict["video_url"] = f"/static/uploads/{file.filename}"
+        result_dict["metadata"] = {
+            "duration_seconds": result.video_duration,
+            "fps": result.fps,
+            "total_frames": result.total_frames,
+            "resolution": result.resolution,
+        }
+        result_dict["summary"] = {
+            "dominant_emotion": dom_mood,
+            "total_scenes": len(result.scenes),
+        }
+
         # Step 2: Run Meta MusicGen AI music generation & lossless video muxing
         cmd = [
             sys.executable,
@@ -184,9 +221,9 @@ async def batch_process_video(file: UploadFile = File(...)):
             "video_url": f"/static/uploads/{file.filename}",
             "soundtrack_url": f"/static/audio/{soundtrack_name}",
             "final_video_url": f"/static/outputs/{final_video_name}" if final_video_path.exists() else None,
-            "duration": result_dict.get("metadata", {}).get("duration_seconds", 0),
+            "duration": round(result.video_duration, 2),
             "scenes_count": len(scenes_data),
-            "dominant_emotion": result_dict.get("summary", {}).get("dominant_emotion", "Unknown"),
+            "dominant_emotion": dom_mood,
             "scenes": scenes_list,
             "analysis": result_dict,
         })
@@ -944,64 +981,103 @@ HTML_CONTENT = """<!DOCTYPE html>
       // Video preview
       const video = document.getElementById('videoPlayer');
       video.src = data.video_url;
+      video.onloadedmetadata = () => {
+        if (video.duration && !isNaN(video.duration) && video.duration > 0) {
+          document.getElementById('metaDuration').textContent = `${video.duration.toFixed(1)}s`;
+        }
+      };
       if (autoPlay) video.play().catch(() => {});
 
-      // Metadata
+      // Metadata extraction
+      const durationVal = data.video_duration ?? data.duration ?? data.metadata?.duration_seconds ?? 0;
+      const resVal = data.resolution ?? (data.metadata?.width ? `${data.metadata.width}x${data.metadata.height}` : '-');
+      const fpsVal = data.fps ?? data.metadata?.fps ?? 24;
+      const framesVal = data.total_frames ?? data.metadata?.total_frames ?? '-';
+
       document.getElementById('metaFilename').textContent = data.filename || 'Uploaded Video';
-      document.getElementById('metaDuration').textContent = `${(data.metadata?.duration_seconds || 0).toFixed(1)}s`;
-      document.getElementById('metaRes').textContent = `${data.metadata?.width || 0} x ${data.metadata?.height || 0}`;
-      document.getElementById('metaFps').textContent = `${(data.metadata?.fps || 0).toFixed(0)} fps (${data.metadata?.codec || 'unknown'})`;
-      
-      const domMood = data.summary?.dominant_emotion || 'NEUTRAL';
+      document.getElementById('metaDuration').textContent = `${Number(durationVal).toFixed(1)}s`;
+      document.getElementById('metaRes').textContent = resVal;
+      document.getElementById('metaFps').textContent = `${Number(fpsVal).toFixed(0)} FPS (${framesVal} frames)`;
+
+      // Dominant Mood calculation
+      let domMood = data.summary?.dominant_emotion;
+      if (!domMood && data.scenes && data.scenes.length > 0) {
+        const counts = {};
+        data.scenes.forEach(s => {
+          const m = (s.mood || s.primary_emotion || 'NEUTRAL').toUpperCase();
+          counts[m] = (counts[m] || 0) + 1;
+        });
+        domMood = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b, 'NEUTRAL');
+      }
+      domMood = (domMood || 'NEUTRAL').toUpperCase();
+
       const moodEl = document.getElementById('metaMood');
       moodEl.textContent = domMood;
       moodEl.className = `scene-badge mood-${domMood}`;
 
-      document.getElementById('metaScenesCount').textContent = `${data.scenes?.length || 0} segments`;
-      document.getElementById('sceneCountBadge').textContent = `${data.scenes?.length || 0} Scenes`;
+      const scenesCount = data.scenes?.length || data.total_segments || 0;
+      document.getElementById('metaScenesCount').textContent = `${scenesCount} segments`;
+      document.getElementById('sceneCountBadge').textContent = `${scenesCount} Scenes`;
 
       // Render Scene Cards
       const sceneList = document.getElementById('sceneList');
       sceneList.innerHTML = '';
 
-      (data.scenes || []).forEach((scene) => {
+      (data.scenes || []).forEach((scene, idx) => {
         const card = document.createElement('div');
         card.className = 'scene-card';
-        card.id = `card_${scene.scene_id}`;
+        const sceneId = scene.scene_id || `scene-${idx + 1}`;
+        card.id = `card_${sceneId}`;
 
-        const colorsHtml = (scene.features?.dominant_colors || [])
-          .map(c => `<div class="color-swatch" style="background: rgb(${c[0]}, ${c[1]}, ${c[2]});" title="RGB(${c[0]}, ${c[1]}, ${c[2]})"></div>`)
-          .join('');
+        // Robust time extraction
+        const startTime = Number(scene.start !== undefined ? scene.start : (scene.start_time !== undefined ? scene.start_time : idx * 3.0));
+        const endTime = Number(scene.end !== undefined ? scene.end : (scene.end_time !== undefined ? scene.end_time : startTime + 3.0));
+        const mood = (scene.mood || scene.primary_emotion || 'NEUTRAL').toUpperCase();
+
+        // Robust metrics extraction
+        const motion = Number(scene.metrics?.optical_flow ?? scene.metrics?.camera_motion_intensity ?? scene.features?.motion_score ?? 0);
+        const brightness = Number(scene.metrics?.average_brightness ?? scene.features?.brightness ?? 0);
+        const energy = Number(scene.music_cue?.energy ?? scene.music_cues?.energy_percent ?? 50);
+        const tempo = Number(scene.music_cue?.tempo ?? scene.music_cues?.tempo_bpm ?? 110);
+
+        // Dominant colors extraction
+        const colors = scene.metrics?.dominant_colors || scene.features?.dominant_colors || [];
+        const colorsHtml = colors.map(c => {
+          const bg = typeof c === 'string' ? c : `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+          return `<div class="color-swatch" style="background: ${bg};" title="${bg}"></div>`;
+        }).join('');
+
+        const promptText = scene.prompt || scene.description || 'AI Music cue planned for this scene.';
 
         card.innerHTML = `
           <div class="scene-top">
             <div style="display:flex; align-items:center; gap:0.6rem;">
-              <strong style="color:#c7d2fe; font-size:0.95rem;">${scene.scene_id.toUpperCase()}</strong>
-              <span style="font-size:0.75rem; color:#94a3b8; font-family:'JetBrains Mono';">${scene.start_time.toFixed(1)}s – ${scene.end_time.toFixed(1)}s</span>
+              <strong style="color:#c7d2fe; font-size:0.95rem;">${sceneId.toUpperCase()}</strong>
+              <span style="font-size:0.75rem; color:#94a3b8; font-family:'JetBrains Mono';">${startTime.toFixed(1)}s – ${endTime.toFixed(1)}s</span>
             </div>
-            <span class="scene-badge mood-${scene.primary_emotion}">${scene.primary_emotion}</span>
+            <span class="scene-badge mood-${mood}">${mood}</span>
           </div>
 
           <div class="metrics-chips">
-            <div class="chip">Motion: <strong>${(scene.features?.motion_score || 0).toFixed(2)}</strong></div>
-            <div class="chip">Light: <strong>${(scene.features?.brightness || 0).toFixed(0)}</strong></div>
-            <div class="chip">Energy: <strong>${(scene.music_cues?.energy_percent || 0).toFixed(0)}%</strong></div>
-            <div class="chip">Tempo: <strong>${scene.music_cues?.tempo_bpm || 100} BPM</strong></div>
+            <div class="chip">Motion: <strong>${motion.toFixed(2)}</strong></div>
+            <div class="chip">Light: <strong>${brightness.toFixed(0)}</strong></div>
+            <div class="chip">Energy: <strong>${energy.toFixed(0)}%</strong></div>
+            <div class="chip">Tempo: <strong>${tempo.toFixed(0)} BPM</strong></div>
           </div>
 
           <div class="colors-row">
             <span style="font-size:0.75rem; color:#94a3b8;">Dominant Colors:</span>
-            ${colorsHtml}
+            ${colorsHtml || '<span style="font-size:0.75rem; color:#64748b;">(auto-detected)</span>'}
           </div>
 
-          <div class="prompt-box"><strong>Generated AI Prompt:</strong>\n${scene.prompt}</div>
+          <div class="prompt-box"><strong>Generated AI Prompt:</strong>\n${promptText}</div>
 
-          <div id="audioRow_${scene.scene_id}" style="margin-top:0.75rem; display:none;">
+          <div id="audioRow_${sceneId}" style="margin-top:0.75rem; display:none;">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.35rem;">
               <span style="font-size:0.75rem; font-weight:700; color:#a5b4fc;">Scene Audio:</span>
-              <a id="dl_${scene.scene_id}" class="pill" style="font-size:0.68rem; color:#93c5fd; text-decoration:none;" download="${scene.scene_id}.wav">⬇ Download WAV</a>
+              <a id="dl_${sceneId}" class="pill" style="font-size:0.68rem; color:#93c5fd; text-decoration:none;" download="${sceneId}.wav">⬇ Download WAV</a>
             </div>
-            <audio id="audio_${scene.scene_id}" controls style="width:100%; height:32px;"></audio>
+            <audio id="audio_${sceneId}" controls style="width:100%; height:32px;"></audio>
           </div>
         `;
         sceneList.appendChild(card);
@@ -1304,8 +1380,8 @@ HTML_CONTENT = """<!DOCTYPE html>
               </div>
 
               <div class="metrics-chips" style="margin-bottom:0.75rem;">
-                <div class="chip">Duration: <strong>${(res.duration || 0).toFixed(1)}s</strong></div>
-                <div class="chip">Scenes: <strong>${res.scenes_count || 0}</strong></div>
+                <div class="chip">Duration: <strong>${Number(res.duration ?? res.analysis?.video_duration ?? res.analysis?.metadata?.duration_seconds ?? 0).toFixed(1)}s</strong></div>
+                <div class="chip">Scenes: <strong>${res.scenes_count || (res.scenes && res.scenes.length) || (res.analysis?.scenes && res.analysis.scenes.length) || 0}</strong></div>
                 <div class="chip">Format: <strong>16-bit PCM / 32kHz</strong></div>
               </div>
 

@@ -141,6 +141,35 @@ class VideoProcessor:
                 total_frames = frames_counted
                 duration = (frames_counted / fps) if fps > 0 else 0.0
 
+            # Cross-verify container duration using FFmpeg if available (handles VFR/smartphones with 100% precision)
+            try:
+                import re
+                import subprocess
+                import imageio_ffmpeg
+
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                proc = subprocess.run(
+                    [ffmpeg_exe, "-i", str(path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", proc.stderr)
+                if match:
+                    h, m, s = match.groups()
+                    container_duration = int(h) * 3600 + int(m) * 60 + float(s)
+                    if container_duration > 0:
+                        # Use container duration if OpenCV was 0 or significantly discrepant (> 5%)
+                        if duration <= 0 or abs(duration - container_duration) > (0.05 * container_duration):
+                            logger.info(
+                                "Using accurate container duration from FFmpeg header: %.2fs (OpenCV was %.2fs)",
+                                container_duration,
+                                duration,
+                            )
+                            duration = container_duration
+            except Exception:
+                pass
+
             if duration <= 0.0 or total_frames == 0:
                 raise ValueError(f"Video file contains no readable video frames: {path.name}")
 
