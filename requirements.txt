@@ -16,6 +16,6 @@ pydub==0.25.1
 imageio-ffmpeg==0.6.0
 
 # 3. Meta MusicGen Neural Audio Synthesis (Apple Silicon MPS / CUDA / CPU)
-torch==2.8.0
-transformers==4.57.6
-scipy==1.13.1
+torch>=2.2.0
+transformers>=4.40.0
+scipy>=1.11.0
