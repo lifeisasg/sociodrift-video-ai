@@ -14,7 +14,6 @@ uvicorn==0.39.0
 python-multipart==0.0.20
 pydub==0.25.1
 imageio-ffmpeg==0.6.0
-scipy==1.13.1
 
 # Note for GPU / Neural MusicGen synthesis:
 # To install Meta MusicGen transformer packages, see requirements-studio.txt

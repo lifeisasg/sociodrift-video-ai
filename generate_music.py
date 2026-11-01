@@ -70,6 +70,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def write_wav(output_path: Path | str, sampling_rate: int, pcm16_data) -> None:
+    """Save 16-bit PCM audio to a WAV file using Python's built-in wave module (zero external dependencies)."""
+    import wave
+    import numpy as np
+    pcm16 = np.asarray(pcm16_data, dtype=np.int16)
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(1)      # mono
+        wf.setsampwidth(2)      # 2 bytes = 16-bit
+        wf.setframerate(sampling_rate)
+        wf.writeframes(pcm16.tobytes())
+
+
 def generate_procedural_scene_audio(scene: dict, duration: float, sampling_rate: int = 32000):
     """Generate harmonic procedural cinematic audio for cloud hosts with constrained RAM (Render Free)."""
     import numpy as np
@@ -133,7 +145,6 @@ def main() -> int:
 
     try:
         import numpy as np
-        import scipy.io.wavfile
         import torch
         from transformers import AutoProcessor, MusicgenForConditionalGeneration
 
@@ -159,7 +170,6 @@ def main() -> int:
         sampling_rate = model.config.audio_encoder.sampling_rate
     except Exception as exc:
         import numpy as np
-        import scipy.io.wavfile
         logger.warning(
             "Neural audio synthesis not available (%s). "
             "Using harmonic procedural audio synthesizer (lightweight cloud mode).",
@@ -261,9 +271,9 @@ def main() -> int:
 
         stem = Path(data.get("filepath", "")).stem if data.get("filepath") else json_path.stem
         wav_path = out_dir / f"{stem}_{scene_id}.wav"
-        scipy.io.wavfile.write(str(wav_path), sampling_rate, pcm16)
+        write_wav(wav_path, sampling_rate, pcm16)
         # Also maintain generic scene file for backward compatibility
-        scipy.io.wavfile.write(str(out_dir / f"{scene_id}.wav"), sampling_rate, pcm16)
+        write_wav(out_dir / f"{scene_id}.wav", sampling_rate, pcm16)
         logger.info("Saved scene audio: %s", wav_path)
 
         generated_audio_paths.append(wav_path)
@@ -294,12 +304,12 @@ def main() -> int:
             logger.warning("PyDub crossfading fallback to simple concat: %s", exc)
             if all_audio_chunks:
                 full_soundtrack = np.concatenate(all_audio_chunks)
-                scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
-                scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
+                write_wav(full_soundtrack_path, sampling_rate, full_soundtrack)
+                write_wav(legacy_soundtrack_path, sampling_rate, full_soundtrack)
     elif all_audio_chunks:
         full_soundtrack = np.concatenate(all_audio_chunks)
-        scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
-        scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
+        write_wav(full_soundtrack_path, sampling_rate, full_soundtrack)
+        write_wav(legacy_soundtrack_path, sampling_rate, full_soundtrack)
         logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
 
     # Merge audio back into original input video with 100% lossless video stream copying
