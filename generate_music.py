@@ -70,57 +70,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def write_wav(output_path: Path | str, sampling_rate: int, pcm16_data) -> None:
-    """Save 16-bit PCM audio to a WAV file using Python's built-in wave module (zero external dependencies)."""
-    import wave
-    import numpy as np
-    pcm16 = np.asarray(pcm16_data, dtype=np.int16)
-    with wave.open(str(output_path), "wb") as wf:
-        wf.setnchannels(1)      # mono
-        wf.setsampwidth(2)      # 2 bytes = 16-bit
-        wf.setframerate(sampling_rate)
-        wf.writeframes(pcm16.tobytes())
-
-
-def generate_procedural_scene_audio(scene: dict, duration: float, sampling_rate: int = 32000):
-    """Generate harmonic procedural cinematic audio for cloud hosts with constrained RAM (Render Free)."""
-    import numpy as np
-
-    t = np.linspace(0, duration, int(sampling_rate * duration), endpoint=False)
-    mood = scene.get("mood", "calm").lower()
-    cue = scene.get("music_cue", {})
-    tempo = float(cue.get("tempo", 110))
-    beat_freq = tempo / 60.0
-
-    if "suspense" in mood or "horror" in mood:
-        # Dark low drone + dissonant tension chords
-        f1, f2, f3 = 55.0, 58.27, 110.0
-        wave = 0.4 * np.sin(2 * np.pi * f1 * t) + 0.3 * np.sin(2 * np.pi * f2 * t) + 0.2 * np.sin(2 * np.pi * f3 * t)
-        envelope = 0.7 + 0.3 * np.sin(2 * np.pi * 0.2 * t)
-        wave = wave * envelope
-    elif "energetic" in mood or "action" in mood:
-        # Driving synth bass + rhythm pulse
-        f1, f2 = 110.0, 220.0
-        rhythm = (0.5 * (1 + np.sin(2 * np.pi * beat_freq * t))) ** 2
-        wave = (0.4 * np.sin(2 * np.pi * f1 * t) + 0.3 * np.sin(2 * np.pi * f2 * t)) * rhythm
-    else:
-        # Calm / Peaceful warm ambient chord
-        f1, f2, f3 = 130.81, 164.81, 196.00
-        wave = 0.35 * np.sin(2 * np.pi * f1 * t) + 0.25 * np.sin(2 * np.pi * f2 * t) + 0.2 * np.sin(2 * np.pi * f3 * t)
-        wave = wave * (0.8 + 0.2 * np.sin(2 * np.pi * 0.1 * t))
-
-    fade_len = int(sampling_rate * 0.05)
-    if len(wave) > 2 * fade_len:
-        fade_in = np.linspace(0, 1, fade_len)
-        fade_out = np.linspace(1, 0, fade_len)
-        wave[:fade_len] *= fade_in
-        wave[-fade_len:] *= fade_out
-
-    return wave.astype(np.float32)
-
-
 def main() -> int:
     args = parse_args()
+
+    try:
+        import numpy as np
+        import scipy.io.wavfile
+        import torch
+        from transformers import AutoProcessor, MusicgenForConditionalGeneration
+    except ImportError as exc:
+        logger.error(
+            "Missing dependencies for neural audio synthesis (%s). "
+            "Please run: pip install torch transformers scipy",
+            exc,
+        )
+        return 1
 
     json_path = Path(args.json).resolve()
     if not json_path.exists():
@@ -138,43 +102,41 @@ def main() -> int:
     out_dir = Path(args.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model = None
+    # Determine hardware acceleration
+    if torch.backends.mps.is_available():
+        device = "mps"
+        logger.info("Using Apple Silicon Metal Performance Shaders (MPS) GPU acceleration!")
+    elif torch.cuda.is_available():
+        device = "cuda"
+        logger.info("Using NVIDIA CUDA GPU acceleration!")
+    else:
+        device = "cpu"
+        logger.info("Using CPU for neural music generation.")
+
+    logger.info("Loading Meta MusicGen model: %s ...", args.model)
     processor = None
-    device = "cpu"
-    sampling_rate = 32000
-
     try:
-        import numpy as np
-        import torch
-        from transformers import AutoProcessor, MusicgenForConditionalGeneration
-
-        # Determine hardware acceleration
-        if torch.backends.mps.is_available():
-            device = "mps"
-            logger.info("Using Apple Silicon Metal Performance Shaders (MPS) GPU acceleration!")
-        elif torch.cuda.is_available():
-            device = "cuda"
-            logger.info("Using NVIDIA CUDA GPU acceleration!")
-        else:
-            device = "cpu"
-            logger.info("Using CPU for neural music generation.")
-
-        logger.info("Loading Meta MusicGen model: %s ...", args.model)
+        from transformers import MusicgenProcessor
+        processor = MusicgenProcessor.from_pretrained(args.model, local_files_only=True)
+    except Exception:
         try:
             processor = AutoProcessor.from_pretrained(args.model, local_files_only=True)
-            model = MusicgenForConditionalGeneration.from_pretrained(args.model, local_files_only=True)
         except Exception:
             processor = AutoProcessor.from_pretrained(args.model)
-            model = MusicgenForConditionalGeneration.from_pretrained(args.model)
+
+    try:
+        model = MusicgenForConditionalGeneration.from_pretrained(args.model, local_files_only=True)
+    except Exception:
+        model = MusicgenForConditionalGeneration.from_pretrained(args.model)
+
+    try:
         model.to(device)
-        sampling_rate = model.config.audio_encoder.sampling_rate
     except Exception as exc:
-        import numpy as np
-        logger.warning(
-            "Neural audio synthesis not available (%s). "
-            "Using harmonic procedural audio synthesizer (lightweight cloud mode).",
-            exc,
-        )
+        logger.warning("Could not transfer model to %s (%s). Falling back to CPU.", device, exc)
+        device = "cpu"
+        model.to(device)
+
+    sampling_rate = model.config.audio_encoder.sampling_rate
     generated_audio_paths: list[Path] = []
     all_audio_chunks: list[np.ndarray] = []
 
@@ -235,10 +197,10 @@ def main() -> int:
             duration,
         )
 
-        if model is not None and processor is not None:
-            # 50 tokens per second of audio
-            max_tokens = int(max(duration, 1.5) * 50)
+        # 50 tokens per second of audio
+        max_tokens = int(max(duration, 1.5) * 50)
 
+        try:
             inputs = processor(
                 text=[prompt_text],
                 padding=True,
@@ -247,11 +209,23 @@ def main() -> int:
 
             with torch.no_grad():
                 audio_values = model.generate(**inputs, max_new_tokens=max_tokens)
+        except Exception as exc:
+            if device != "cpu":
+                logger.warning("Generation on %s failed (%s). Retrying on CPU...", device, exc)
+                device = "cpu"
+                model.to(device)
+                inputs = processor(
+                    text=[prompt_text],
+                    padding=True,
+                    return_tensors="pt",
+                ).to(device)
+                with torch.no_grad():
+                    audio_values = model.generate(**inputs, max_new_tokens=max_tokens)
+            else:
+                raise exc
 
-            # Convert tensor to numpy 1D waveform
-            waveform = audio_values[0, 0].cpu().numpy().astype(np.float32)
-        else:
-            waveform = generate_procedural_scene_audio(scene, duration, sampling_rate)
+        # Convert tensor to numpy 1D waveform
+        waveform = audio_values[0, 0].cpu().numpy().astype(np.float32)
 
         # Truncate or match exact segment duration
         target_samples = int(duration * sampling_rate)
@@ -271,9 +245,9 @@ def main() -> int:
 
         stem = Path(data.get("filepath", "")).stem if data.get("filepath") else json_path.stem
         wav_path = out_dir / f"{stem}_{scene_id}.wav"
-        write_wav(wav_path, sampling_rate, pcm16)
+        scipy.io.wavfile.write(str(wav_path), sampling_rate, pcm16)
         # Also maintain generic scene file for backward compatibility
-        write_wav(out_dir / f"{scene_id}.wav", sampling_rate, pcm16)
+        scipy.io.wavfile.write(str(out_dir / f"{scene_id}.wav"), sampling_rate, pcm16)
         logger.info("Saved scene audio: %s", wav_path)
 
         generated_audio_paths.append(wav_path)
@@ -304,12 +278,12 @@ def main() -> int:
             logger.warning("PyDub crossfading fallback to simple concat: %s", exc)
             if all_audio_chunks:
                 full_soundtrack = np.concatenate(all_audio_chunks)
-                write_wav(full_soundtrack_path, sampling_rate, full_soundtrack)
-                write_wav(legacy_soundtrack_path, sampling_rate, full_soundtrack)
+                scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+                scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
     elif all_audio_chunks:
         full_soundtrack = np.concatenate(all_audio_chunks)
-        write_wav(full_soundtrack_path, sampling_rate, full_soundtrack)
-        write_wav(legacy_soundtrack_path, sampling_rate, full_soundtrack)
+        scipy.io.wavfile.write(str(full_soundtrack_path), sampling_rate, full_soundtrack)
+        scipy.io.wavfile.write(str(legacy_soundtrack_path), sampling_rate, full_soundtrack)
         logger.info("Saved stitched complete soundtrack: %s", full_soundtrack_path)
 
     # Merge audio back into original input video with 100% lossless video stream copying
